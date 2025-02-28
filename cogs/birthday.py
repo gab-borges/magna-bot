@@ -4,30 +4,40 @@ import json
 from datetime import datetime, time, timedelta
 import pytz
 import asyncio
+import os
 
 class Birthday(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Load data from environment variables instead of files
         self.birthdays = self.load_birthdays()
         self.channels = self.load_channels()
         self.check_birthdays.start()
 
     def load_birthdays(self):
         try:
-            with open('birthdays.json', 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
+            # Load from environment variable
+            birthdays_str = os.getenv('BIRTHDAYS', '{}')
+            return json.loads(birthdays_str)
+        except Exception as e:
+            print(f"Error loading birthdays: {e}")
             return {}
 
     def save_birthdays(self):
-        with open('birthdays.json', 'w') as f:
-            json.dump(self.birthdays, f, indent=4)
+        # Convert dict to JSON string
+        birthdays_str = json.dumps(self.birthdays)
+        # In local development, you might want to save to a file
+        if os.getenv('DEVELOPMENT'):
+            with open('birthdays.json', 'w') as f:
+                json.dump(self.birthdays, f, indent=4)
 
     def load_channels(self):
         try:
-            with open('birthday_channels.json', 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
+            # Load from environment variable
+            channels_str = os.getenv('BIRTHDAY_CHANNELS', '{}')
+            return json.loads(channels_str)
+        except Exception as e:
+            print(f"Error loading channels: {e}")
             return {}
 
     def save_channels(self):
