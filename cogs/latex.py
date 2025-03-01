@@ -1,18 +1,12 @@
 import discord
 from discord.ext import commands
-import matplotlib.pyplot as plt
-import matplotlib as mpl
-import io
+import subprocess
 import os
+import tempfile
 
 class LaTeX(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Configure matplotlib to use AMS Euler font
-        mpl.rcParams['mathtext.fontset'] = 'stix'  # STIX fonts include Euler
-        mpl.rcParams['mathtext.rm'] = 'Euler'
-        mpl.rcParams['mathtext.it'] = 'Euler'
-        mpl.rcParams['mathtext.bf'] = 'Euler'
         
     @commands.Cog.listener()
     async def on_ready(self):
@@ -23,32 +17,49 @@ class LaTeX(commands.Cog):
         """Convert LaTeX text to an image"""
         try:
             async with ctx.typing():
-                # Create figure with white background
-                plt.figure(figsize=(10, 3), facecolor='white')
-                plt.axis('off')  # Hide axes
-                
-                # Add text with matplotlib's math rendering
-                plt.text(0.5, 0.5, f"${latex_text}$", 
-                         size=36,  # Larger font size
-                         ha='center', 
-                         va='center',
-                         transform=plt.gca().transAxes)
-                
-                # Tight layout to remove extra whitespace
-                plt.tight_layout()
-                
-                # Save to a BytesIO object with higher DPI
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png', dpi=400, bbox_inches='tight', pad_inches=0.2)
-                buf.seek(0)
-                plt.close()
-                
-                # Send the image
-                await ctx.send(file=discord.File(buf, filename="latex.png"))
+                # Create a temporary directory
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    # Create LaTeX document
+                    tex_content = (
+                        "\\documentclass[12pt]{article}\n"
+                        "\\usepackage{amsmath,amssymb}\n"
+                        "\\usepackage[paperwidth=25cm,paperheight=10cm,margin=4cm]{geometry}\n"
+                        "\\pagestyle{empty}\n"
+                        "\\begin{document}\n"
+                        "\\begin{center}\n"
+                        f"${latex_text}$\n"
+                        "\\end{center}\n"
+                        "\\end{document}\n"
+                    )
+                    
+                    # Write LaTeX content to file
+                    tex_file = os.path.join(tmpdir, "equation.tex")
+                    with open(tex_file, "w") as f:
+                        f.write(tex_content)
+                    
+                    # Compile LaTeX to DVI
+                    subprocess.run(
+                        ["latex", "-interaction=nonstopmode", "-output-directory", tmpdir, tex_file],
+                        capture_output=True
+                    )
+                    
+                    # Convert DVI to PNG with high resolution
+                    dvi_file = os.path.join(tmpdir, "equation.dvi")
+                    png_file = os.path.join(tmpdir, "equation.png")
+                    subprocess.run([
+                        "dvipng",
+                        "-D", "300",  # Resolution
+                        "-bg", "white",  # Background color
+                        "-T", "tight",  # Tight bounding box
+                        "-o", png_file,
+                        dvi_file
+                    ])
+                    
+                    # Send the image
+                    await ctx.send(file=discord.File(png_file))
                     
         except Exception as e:
             await ctx.send(f"❌ Error rendering LaTeX: {str(e)}")
-            # Print full error for debugging
             import traceback
             traceback.print_exc()
 
