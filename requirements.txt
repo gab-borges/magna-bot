@@ -5,3 +5,4 @@ asyncpraw
 pytz
 yt-dlp
 PyNaCl
+matplotlib
