@@ -9,6 +9,7 @@ A Discord bot built with Python and discord.py that combines fun interactions wi
 - **Birthday Tracking**: Manage and celebrate member birthdays (`%birthday`)
 - **Member Counter**: Automatic server member counting
 - **Simple Commands**: Basic interaction commands (`%hello`, `%ping`)
+- **Music Player**: Play YouTube songs in voice channels (`%play`, `%stop`, `%skip`, `%queue`)
 
 ## Setup 🚀
 
