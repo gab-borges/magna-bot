@@ -1,19 +1,18 @@
 FROM python:3.11-slim
 
-# Install LaTeX and required packages
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    texlive-latex-base \
-    texlive-latex-extra \
-    texlive-fonts-recommended \
-    texlive-science \
-    dvipng \
-    cm-super \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Set working directory
 WORKDIR /app
-COPY . .
 
-# Install Python dependencies
+# Copy requirements first to leverage Docker cache
+COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-CMD ["python", "main.py"]
+# Copy the rest of the application
+COPY . .
+
+CMD ["python", "bot.py"]
