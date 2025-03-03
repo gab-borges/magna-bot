@@ -1,7 +1,9 @@
-discord.py
+discord.py[voice]
 python-dotenv
 google-generativeai
 asyncpraw
 pytz
 yt-dlp
 PyNaCl
+requests
+beautifulsoup4
