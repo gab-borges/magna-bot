@@ -15,4 +15,4 @@ RUN pip install -r requirements.txt
 # Copy the rest of the application
 COPY . .
 
-CMD ["python", "bot.py"]
+CMD ["python", "main.py"]
