@@ -6,6 +6,14 @@ import re
 import traceback
 import requests
 from bs4 import BeautifulSoup
+import json
+import urllib.parse
+import random
+import os
+import io
+import aiohttp
+import time
+from pathlib import Path
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -14,8 +22,14 @@ class Music(commands.Cog):
         self.current_songs = {}
         self.queue = {}
         self.search_results = {}
+        self.stream_cache = {}  # Cache for successful stream URLs
+        self.cache_timeout = 3600  # Cache timeout in seconds (1 hour)
         
-        # YT-DLP configuration
+        # Create cache directory
+        self.cache_dir = Path('temp_audio')
+        self.cache_dir.mkdir(exist_ok=True)
+        
+        # YT-DLP configuration with more robust settings
         self.ydl_opts = {
             'format': 'bestaudio/best',
             'postprocessors': [{
@@ -24,23 +38,52 @@ class Music(commands.Cog):
                 'preferredquality': '192',
             }],
             'noplaylist': True,
-            'quiet': True
-        }
-        
-        # Search configuration
-        self.search_opts = {
-            'format': 'bestaudio/best',
-            'noplaylist': True,
             'quiet': True,
-            'default_search': 'ytsearch10',
-            'extract_flat': True
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'ignoreerrors': False,
+            'geo_bypass': True,
+            'geo_bypass_country': 'US',
+            'socket_timeout': 10,
+            'retries': 5,
+            'extractor_retries': 5,
+            'fragment_retries': 5,
+            'extract_flat': 'in_playlist',
+            'concurrent_fragment_downloads': 5,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml',
+                'Referer': 'https://www.youtube.com/'
+            }
         }
         
-        # FFMPEG options
+        # FFMPEG options with more robust settings
         self.FFMPEG_OPTIONS = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-            'options': '-vn',
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -loglevel warning',
+            'options': '-vn -bufsize 64k',
         }
+        
+        # Initialize instance lists
+        self.piped_instances = [
+            "https://pipedapi.kavin.rocks",
+            "https://pipedapi.tokhmi.xyz",
+            "https://piped-api.lunar.icu",
+            "https://pipedapi.syncpundit.io",
+            "https://api-piped.mha.fi",
+            "https://pipedapi.osphost.fi",
+            "https://pipedapi.in.projectsegfau.lt"
+        ]
+        
+        self.invidious_instances = [
+            "https://invidious.protokolla.fi",
+            "https://invidious.esmailelbob.xyz",
+            "https://yt.artemislena.eu",
+            "https://invidious.nerdvpn.de",
+            "https://invidious.dhusch.de",
+            "https://vid.puffyan.us",
+            "https://invidious.private.coffee"
+        ]
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -52,54 +95,463 @@ class Music(commands.Cog):
             url = self.queue[str(ctx.guild.id)].pop(0)
             await self.play_song(ctx, url)
 
-    async def play_song(self, ctx, url):
+    async def extract_youtube_id(self, url):
+        """Extract video ID from a YouTube URL"""
+        # Extended regex to handle more YouTube URL formats
+        youtube_regex = r'(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|(?:youtu\.be|music\.youtube\.com)\/([a-zA-Z0-9_-]{11}))'
+        match = re.search(youtube_regex, url)
+        
+        if match:
+            return match.group(1)
+        
+        # Additional checks for other URL formats
+        if 'youtube.com' in url or 'youtu.be' in url or 'music.youtube.com' in url:
+            # Check for v= parameter
+            v_param = re.search(r'[?&]v=([a-zA-Z0-9_-]{11})', url)
+            if v_param:
+                return v_param.group(1)
+                
+            # Check for youtu.be/ format
+            short_url = re.search(r'youtu\.be\/([a-zA-Z0-9_-]{11})', url)
+            if short_url:
+                return short_url.group(1)
+                
+            # Check for music.youtube.com
+            music_url = re.search(r'music\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})', url)
+            if music_url:
+                return music_url.group(1)
+        
+        return None
+
+    async def is_youtube_url(self, url):
+        """Check if a URL is a YouTube URL"""
+        youtube_domains = [
+            'youtube.com', 
+            'youtu.be', 
+            'www.youtube.com', 
+            'm.youtube.com',
+            'music.youtube.com',
+            'youtube-nocookie.com'
+        ]
+        for domain in youtube_domains:
+            if domain in url:
+                return True
+        return False
+
+    async def get_cached_stream(self, video_id):
+        """Get stream URL from cache if available and not expired"""
+        if video_id in self.stream_cache:
+            cache_data = self.stream_cache[video_id]
+            if time.time() - cache_data['timestamp'] < self.cache_timeout:
+                return cache_data['url']
+        return None
+
+    async def cache_stream(self, video_id, stream_url):
+        """Cache stream URL with timestamp"""
+        self.stream_cache[video_id] = {
+            'url': stream_url,
+            'timestamp': time.time()
+        }
+
+    async def get_direct_stream(self, video_id):
+        """Get stream URL directly from YouTube frontend"""
         try:
-            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if 'url' not in info:
-                    await ctx.send("❌ Could not extract audio URL from video")
-                    return
-                    
-                url2 = info['url']
-                title = info.get('title', 'Unknown Title')
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Connection': 'keep-alive',
+                'DNT': '1',
+                'Referer': 'https://www.youtube.com/'
+            }
+            
+            # Try to get stream URL from YouTube directly
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        
+                        # Extract player response
+                        player_response = re.search(r'ytInitialPlayerResponse\s*=\s*({.+?});', html)
+                        if player_response:
+                            data = json.loads(player_response.group(1))
+                            
+                            # Try to find audio stream URL
+                            formats = data.get('streamingData', {}).get('adaptiveFormats', [])
+                            for fmt in formats:
+                                if fmt.get('mimeType', '').startswith('audio/'):
+                                    return {
+                                        'url': fmt.get('url', ''),
+                                        'title': data.get('videoDetails', {}).get('title', 'Unknown Title')
+                                    }
+            
+            return None
+        except Exception as e:
+            print(f"Direct stream error: {str(e)}")
+            return None
+
+    async def get_piped_stream(self, video_id):
+        """Get stream URL from Piped API"""
+        # Try each Piped instance
+        random.shuffle(self.piped_instances)  # Randomize to distribute load
+        
+        for instance in self.piped_instances:
+            try:
+                api_url = f"{instance}/streams/{video_id}"
+                response = requests.get(api_url, timeout=10)
                 
+                if response.status_code == 200:
+                    data = response.json()
+                    title = data.get('title', 'Unknown Title')
+                    
+                    # First try to get audio streams
+                    if 'audioStreams' in data and data['audioStreams']:
+                        for stream in data['audioStreams']:
+                            return {
+                                'url': stream['url'],
+                                'title': title
+                            }
+                    
+                    # If no audio streams, try video streams
+                    if 'videoStreams' in data and data['videoStreams']:
+                        return {
+                            'url': data['videoStreams'][0]['url'],
+                            'title': title
+                        }
+            except Exception as e:
+                print(f"Error with Piped instance {instance}: {str(e)}")
+                continue
+                
+        return None
+
+    async def get_invidious_stream(self, video_id):
+        """Get stream URL from Invidious API"""
+        random.shuffle(self.invidious_instances)  # Randomize to distribute load
+        
+        for instance in self.invidious_instances:
+            try:
+                api_url = f"{instance}/api/v1/videos/{video_id}"
+                response = requests.get(api_url, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    title = data.get('title', 'Unknown Title')
+                    
+                    # Get audio formats
+                    formats = data.get('adaptiveFormats', [])
+                    for fmt in formats:
+                        if fmt.get('type', '').startswith('audio/'):
+                            return {
+                                'url': fmt['url'],
+                                'title': title
+                            }
+                    
+                    # Fallback to any format with a URL
+                    if formats and 'url' in formats[0]:
+                        return {
+                            'url': formats[0]['url'],
+                            'title': title
+                        }
+            except Exception as e:
+                print(f"Error with Invidious instance {instance}: {str(e)}")
+                continue
+                
+        return None
+
+    async def get_ytmusic_stream(self, video_id):
+        """Get stream URL from YouTube Music API (last resort)"""
+        try:
+            api_url = f"https://music.youtube.com/watch?v={video_id}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://music.youtube.com/'
+            }
+            
+            # Try to get direct stream URL from public sources
+            stream_sources = [
+                f"https://pipedapi.kavin.rocks/streams/{video_id}",
+                f"https://pipedapi-libre.kavin.rocks/streams/{video_id}",
+                f"https://vid.puffyan.us/latest_version?id={video_id}&itag=140",
+                f"https://yt.artemislena.eu/latest_version?id={video_id}&itag=140"
+            ]
+            
+            for src in stream_sources:
                 try:
-                    source = await discord.FFmpegOpusAudio.from_probe(url2, **self.FFMPEG_OPTIONS)
+                    response = requests.get(src, headers=headers, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if isinstance(data, dict):
+                            # Handle Piped API format
+                            if 'audioStreams' in data and data['audioStreams']:
+                                return {
+                                    'url': data['audioStreams'][0]['url'],
+                                    'title': data.get('title', 'YouTube Music Track')
+                                }
+                        elif isinstance(data, str) and data.startswith('http'):
+                            # Handle direct URL response
+                            return {
+                                'url': data,
+                                'title': 'YouTube Music Track'
+                            }
                 except Exception as e:
-                    await ctx.send(f"❌ Error creating audio source: {str(e)}")
-                    return
+                    print(f"Error with YT Music source {src}: {str(e)}")
+                    continue
+                
+            return None
+        except Exception as e:
+            print(f"Error with YT Music API: {str(e)}")
+            return None
+
+    async def direct_search(self, query):
+        """Search directly from YouTube's frontend and get results"""
+        try:
+            search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9'
+            }
+            
+            session = aiohttp.ClientSession()
+            async with session.get(search_url, headers=headers) as response:
+                if response.status == 200:
+                    html = await response.text()
                     
-                self.current_songs[str(ctx.guild.id)] = title
-                
-                vc = self.voice_clients[str(ctx.guild.id)]
-                if not vc.is_connected():
-                    await ctx.send("❌ Voice client disconnected")
-                    return
+                    # Extract video IDs from the page
+                    video_ids = re.findall(r'watch\?v=([a-zA-Z0-9_-]{11})', html)
+                    unique_ids = []
+                    for vid_id in video_ids:
+                        if vid_id not in unique_ids:
+                            unique_ids.append(vid_id)
                     
-                vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(
-                    self.play_next(ctx), self.bot.loop).result())
+                    # Limit to 10 results
+                    limited_ids = unique_ids[:10]
+                    
+                    # Format results
+                    formatted_results = []
+                    for vid_id in limited_ids:
+                        # Extract title from page if possible
+                        title_match = re.search(r'title="([^"]+)".*?watch\?v=' + vid_id, html)
+                        title = title_match.group(1) if title_match else f"YouTube Video ({vid_id})"
+                        
+                        formatted_results.append({
+                            'id': vid_id,
+                            'title': title,
+                            'duration_string': 'Unknown',
+                            'webpage_url': f"https://www.youtube.com/watch?v={vid_id}"
+                        })
+                    
+                    await session.close()
+                    return formatted_results
+            
+            await session.close()
+            return []
+        except Exception as e:
+            print(f"Direct search error: {str(e)}")
+            return []
+
+    async def play_song(self, ctx, url):
+        """Play a song using multiple fallback methods"""
+        try:
+            # First determine if this is a YouTube URL
+            is_youtube = await self.is_youtube_url(url)
+            
+            if is_youtube:
+                # Extract the YouTube video ID
+                video_id = await self.extract_youtube_id(url)
+                if not video_id:
+                    await ctx.send("❌ Could not extract YouTube video ID")
+                    return
                 
-                embed = discord.Embed(
-                    title="🎵 Now Playing",
-                    description=f"**{title}**",
-                    color=discord.Color.green()
-                )
-                await ctx.send(embed=embed)
+                # Check cache first
+                cached_url = await self.get_cached_stream(video_id)
+                if cached_url:
+                    stream_data = {'url': cached_url, 'title': self.current_songs.get(str(ctx.guild.id), 'Cached Song')}
+                else:
+                    await ctx.send("🔍 Getting stream from YouTube...")
+                    
+                    # Try each method in sequence
+                    stream_data = None
+                    
+                    # 1. Try with yt-dlp first (most reliable)
+                    try:
+                        with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+                            if 'url' in info:
+                                stream_data = {
+                                    'url': info['url'],
+                                    'title': info.get('title', 'Unknown Title')
+                                }
+                    except Exception as ydl_error:
+                        print(f"yt-dlp error: {str(ydl_error)}")
+                    
+                    # 2. If yt-dlp failed, try Piped API
+                    if not stream_data:
+                        await ctx.send("⚠️ Trying alternative source...")
+                        stream_data = await self.get_piped_stream(video_id)
+                    
+                    # 3. If Piped failed, try Invidious
+                    if not stream_data:
+                        await ctx.send("⚠️ Trying another alternative source...")
+                        stream_data = await self.get_invidious_stream(video_id)
+                    
+                    # 4. If both APIs failed, try direct method
+                    if not stream_data:
+                        await ctx.send("⚠️ Trying direct method...")
+                        stream_data = await self.get_direct_stream(video_id)
+                    
+                    # 5. If all streaming methods failed, try downloading
+                    if not stream_data:
+                        await ctx.send("⚠️ Trying download method...")
+                        output_path = self.cache_dir / f"{video_id}.mp3"
+                        
+                        if output_path.exists():
+                            # Use existing downloaded file
+                            stream_data = {
+                                'url': str(output_path),
+                                'title': f"Downloaded Song ({video_id})",
+                                'is_local': True
+                            }
+                        else:
+                            # Try to download using yt-dlp
+                            try:
+                                download_opts = self.ydl_opts.copy()
+                                download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
+                                with yt_dlp.YoutubeDL(download_opts) as ydl:
+                                    info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
+                                    stream_data = {
+                                        'url': str(output_path),
+                                        'title': info.get('title', f"Downloaded Song ({video_id})"),
+                                        'is_local': True
+                                    }
+                            except Exception as e:
+                                print(f"Download error: {str(e)}")
+                    
+                    if not stream_data:
+                        await ctx.send("❌ Could not get audio stream. Please try another video or search term.")
+                        return
+                    
+                    # Cache successful stream URL if it's not a local file
+                    if not stream_data.get('is_local', False):
+                        await self.cache_stream(video_id, stream_data['url'])
                 
+            else:
+                # For non-YouTube URLs, use yt-dlp
+                with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if 'url' not in info:
+                        await ctx.send("❌ Could not extract audio URL")
+                        return
+                    
+                    stream_data = {
+                        'url': info['url'],
+                        'title': info.get('title', 'Unknown Title'),
+                        'is_local': False
+                    }
+            
+            # Create audio source and play
+            try:
+                if stream_data.get('is_local', False):
+                    source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
+                else:
+                    try:
+                        source = await discord.FFmpegOpusAudio.from_probe(stream_data['url'], **self.FFMPEG_OPTIONS)
+                    except Exception as e:
+                        # If FFmpeg fails with 403 Forbidden, try downloading instead
+                        if "403 Forbidden" in str(e):
+                            await ctx.send("⚠️ Stream URL expired or forbidden. Downloading instead...")
+                            
+                            # Try to download using yt-dlp
+                            if is_youtube:
+                                try:
+                                    output_path = self.cache_dir / f"{video_id}.mp3"
+                                    download_opts = self.ydl_opts.copy()
+                                    download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
+                                    with yt_dlp.YoutubeDL(download_opts) as ydl:
+                                        info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
+                                        source = discord.FFmpegOpusAudio(str(output_path), **self.FFMPEG_OPTIONS)
+                                except Exception as dl_err:
+                                    raise Exception(f"Failed to download after 403 error: {str(dl_err)}")
+                            else:
+                                raise e
+                        else:
+                            raise e
+            except Exception as e:
+                await ctx.send(f"❌ Error creating audio source: {str(e)}")
+                return
+            
+            self.current_songs[str(ctx.guild.id)] = stream_data['title']
+            
+            vc = self.voice_clients[str(ctx.guild.id)]
+            if not vc.is_connected():
+                await ctx.send("❌ Voice client disconnected")
+                return
+            
+            vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(
+                self.play_next(ctx), self.bot.loop).result())
+            
+            embed = discord.Embed(
+                title="🎵 Now Playing",
+                description=f"**{stream_data['title']}**",
+                color=discord.Color.green()
+            )
+            await ctx.send(embed=embed)
+            
         except Exception as e:
             error_msg = f"❌ Error playing song: {str(e)}\n```{traceback.format_exc()}```"
-            await ctx.send(error_msg[:1900])  # Discord message length limit
+            await ctx.send(error_msg[:1900])
 
     async def search_youtube(self, query):
+        """Search YouTube with multiple fallback methods"""
+        # Try Invidious API first
         try:
-            with yt_dlp.YoutubeDL(self.search_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch10:{query}", download=False)
-                if 'entries' in info:
-                    return info['entries']
-                return []
+            # Randomly choose an Invidious instance
+            instance = random.choice(self.invidious_instances)
+            
+            # Search using Invidious API
+            encoded_query = urllib.parse.quote(query)
+            api_url = f"{instance}/api/v1/search?q={encoded_query}&type=video"
+            
+            response = requests.get(api_url, timeout=10)
+            if response.status_code == 200:
+                results = response.json()
+                
+                # Format results similar to previous format
+                formatted_results = []
+                for video in results[:10]:  # Limit to 10 results
+                    formatted_results.append({
+                        'id': video.get('videoId'),
+                        'title': video.get('title', 'Unknown Title'),
+                        'duration_string': self._format_duration(video.get('lengthSeconds', 0)),
+                        'channel': video.get('author'),
+                        'webpage_url': f"https://www.youtube.com/watch?v={video.get('videoId')}"
+                    })
+                return formatted_results
+                
         except Exception as e:
-            print(f"Search error: {str(e)}")
-            return []
+            print(f"Invidious API search error: {str(e)}")
+        
+        # If Invidious fails, try direct search
+        try:
+            results = await self.direct_search(query)
+            if results:
+                return results
+        except Exception as e:
+            print(f"Direct search error: {str(e)}")
+        
+        # If all searches fail, return empty results
+        return []
+
+    def _format_duration(self, seconds):
+        """Format duration from seconds to MM:SS"""
+        minutes, seconds = divmod(int(seconds), 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes}:{seconds:02d}"
 
     async def handle_spotify_url(self, url):
         """Extract track info from Spotify URL"""
@@ -214,8 +666,8 @@ class Music(commands.Cog):
                 )
 
                 for i, entry in enumerate(results, 1):
-                    title = entry.get('title', 'Unknown Title')
-                    duration = entry.get('duration_string', 'Unknown Duration')
+                    title = entry['title']
+                    duration = entry['duration_string']
                     embed.add_field(
                         name=f"{i}. {title}",
                         value=f"Duration: {duration}",
@@ -238,7 +690,7 @@ class Music(commands.Cog):
                         return await ctx.send("❌ Search cancelled.")
 
                     selected = results[int(msg.content) - 1]
-                    url = f"https://www.youtube.com/watch?v={selected['id']}"
+                    url = selected['webpage_url']
 
                     if vc.is_playing():
                         self.queue[guild_id].append(url)
