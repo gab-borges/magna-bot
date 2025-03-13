@@ -74,23 +74,27 @@ class Latex(commands.Cog):
 
     @commands.command(name="tex")
     async def tex(self, ctx, *, text):
-        r"""Convert LaTeX expressions in text to PNG images
-        Usage: %tex $your_latex_expression$
-        Example: %tex The area of a circle is $A = \pi r^2$"""
+        r"""Convert LaTeX expressions in text to PNG images while preserving normal text
+        Usage: %tex Your text here $latex_expression$ more text here
+        Example: %tex The area of a circle is $A = \pi r^2$ in square units"""
         
         try:
-            # Find all LaTeX expressions in the text
-            matches = self.latex_pattern.finditer(text)
+            # Split text into parts (text and LaTeX)
+            parts = self.latex_pattern.split(text)
             
             # If no LaTeX expressions found
-            if not any(True for _ in matches):
-                await ctx.send("❌ No valid LaTeX expressions found. Use format: $your_latex_expression$")
+            if len(parts) == 1:
+                await ctx.send("❌ No valid LaTeX expressions found. Use format: Your text $latex_expression$ more text")
                 return
             
-            # Process each LaTeX expression
-            matches = self.latex_pattern.finditer(text)  # Reset iterator
-            for match in matches:
-                latex_expr = match.group(1)
+            # Send initial text if it exists
+            message = parts[0].strip()
+            if message:
+                await ctx.send(message)
+            
+            # Process alternating LaTeX expressions and text
+            for i in range(1, len(parts), 2):
+                latex_expr = parts[i]
                 
                 try:
                     # Render LaTeX to PNG
@@ -101,6 +105,13 @@ class Latex(commands.Cog):
                     
                     # Send the image
                     await ctx.send(file=file)
+                    
+                    # Send following text if it exists
+                    if i + 1 < len(parts):
+                        following_text = parts[i + 1].strip()
+                        if following_text:
+                            await ctx.send(following_text)
+                            
                 except ValueError as e:
                     await ctx.send(f"❌ {str(e)}")
         
