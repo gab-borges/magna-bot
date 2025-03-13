@@ -9,6 +9,7 @@ A Discord bot built with Python and discord.py that combines fun interactions wi
 - **Birthday Tracking**: Manage and celebrate member birthdays (`%birthday`)
 - **Member Counter**: Automatic server member counting
 - **Simple Commands**: Basic interaction commands (`%hello`, `%ping`)
+- **LaTeX Rendering**: Convert LaTeX expressions to PNG images (`%latex`)
 - **Music Player**: Advanced music player with multiple features:
   - Play YouTube URLs (`%play [url]`)
   - Search and play songs (`%play [search term]`)
@@ -25,6 +26,12 @@ A Discord bot built with Python and discord.py that combines fun interactions wi
 - `%skip`: Skip to the next song
 - `%queue`: Show the current queue
 - `%leave`: Leave the voice channel
+
+## LaTeX Commands 🔢
+
+- `%latex [text]`: Convert LaTeX expressions in text to PNG images
+  - Use `${...}$` to enclose LaTeX expressions
+  - Example: `%latex The area of a circle is ${A = \pi r^2}$`
 
 ## Setup 🚀
 

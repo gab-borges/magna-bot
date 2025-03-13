@@ -1,8 +1,17 @@
 FROM python:3.11-slim
 
-# Install system dependencies
+# Install system dependencies including LaTeX
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    texlive-latex-base \
+    texlive-latex-extra \
+    texlive-latex-recommended \
+    texlive-fonts-recommended \
+    texlive-fonts-extra \
+    texlive-science \
+    texlive-pictures \
+    dvipng \
+    cm-super \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
