@@ -36,8 +36,16 @@ class Latex(commands.Cog):
             latex_expr = latex_expr.replace(wrong, correct)
         return latex_expr
 
-    def render_latex(self, latex_expr):
-        """Render LaTeX expression to PNG image"""
+    def prepare_text(self, text):
+        """Prepare text for LaTeX rendering by escaping special characters"""
+        # Replace LaTeX special characters with their escaped versions
+        special_chars = ['\\', '{', '}', '_', '^', '#', '&', '$', '%']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text
+
+    def render_mixed_text(self, text):
+        """Render text with both normal text and LaTeX expressions"""
         try:
             # Clear any existing plots
             plt.clf()
@@ -46,15 +54,24 @@ class Latex(commands.Cog):
             fig = plt.figure(figsize=(12, 1.5))  # Made figure larger for complex equations
             fig.patch.set_facecolor('white')
             
-            # Fix common symbol mistakes
-            latex_expr = self.fix_latex_symbols(latex_expr)
+            # Split text into parts and process
+            parts = self.latex_pattern.split(text)
+            
+            # Prepare the complete LaTeX string
+            latex_string = ""
+            for i, part in enumerate(parts):
+                if i % 2 == 0:  # Normal text
+                    if part.strip():
+                        latex_string += self.prepare_text(part)
+                else:  # LaTeX expression
+                    latex_string += f"${self.fix_latex_symbols(part)}$"
             
             # Add text with LaTeX
-            plt.text(0.5, 0.5, f"${latex_expr}$",
+            plt.text(0.5, 0.5, latex_string,
                     horizontalalignment='center',
                     verticalalignment='center',
                     transform=fig.transFigure,
-                    fontsize=16)  # Increased font size
+                    fontsize=16)
             
             # Remove axes
             plt.axis('off')
@@ -74,47 +91,22 @@ class Latex(commands.Cog):
 
     @commands.command(name="tex")
     async def tex(self, ctx, *, text):
-        r"""Convert LaTeX expressions in text to PNG images while preserving normal text
+        r"""Convert text with LaTeX expressions to a single image
         Usage: %tex Your text here $latex_expression$ more text here
         Example: %tex The area of a circle is $A = \pi r^2$ in square units"""
         
         try:
-            # Split text into parts (text and LaTeX)
-            parts = self.latex_pattern.split(text)
+            # Render the mixed text to image
+            image_buf = self.render_mixed_text(text)
             
-            # If no LaTeX expressions found
-            if len(parts) == 1:
-                await ctx.send("❌ No valid LaTeX expressions found. Use format: Your text $latex_expression$ more text")
-                return
+            # Create discord file from buffer
+            file = discord.File(fp=image_buf, filename='latex.png')
             
-            # Send initial text if it exists
-            message = parts[0].strip()
-            if message:
-                await ctx.send(message)
+            # Send the image
+            await ctx.send(file=file)
             
-            # Process alternating LaTeX expressions and text
-            for i in range(1, len(parts), 2):
-                latex_expr = parts[i]
-                
-                try:
-                    # Render LaTeX to PNG
-                    image_buf = self.render_latex(latex_expr)
-                    
-                    # Create discord file from buffer
-                    file = discord.File(fp=image_buf, filename='latex.png')
-                    
-                    # Send the image
-                    await ctx.send(file=file)
-                    
-                    # Send following text if it exists
-                    if i + 1 < len(parts):
-                        following_text = parts[i + 1].strip()
-                        if following_text:
-                            await ctx.send(following_text)
-                            
-                except ValueError as e:
-                    await ctx.send(f"❌ {str(e)}")
-        
+        except ValueError as e:
+            await ctx.send(f"❌ {str(e)}")
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
 
