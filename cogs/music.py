@@ -97,30 +97,15 @@ class Music(commands.Cog):
 
     async def extract_youtube_id(self, url):
         """Extract video ID from a YouTube URL"""
-        # Extended regex to handle more YouTube URL formats
-        youtube_regex = r'(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|(?:youtu\.be|music\.youtube\.com)\/([a-zA-Z0-9_-]{11}))'
+        youtube_regex = (
+            r'(?:https?://)?(?:www\.|m\.)?'
+            r'(?:youtube\.com/(?:watch\?v=|embed/|v/|shorts/|live/|playlist\?list=.*&v=|.*[?&]v=)|'
+            r'youtu\.be/|music\.youtube\.com/watch\?v=)'
+            r'([a-zA-Z0-9_-]{11})'
+        )
         match = re.search(youtube_regex, url)
-        
         if match:
             return match.group(1)
-        
-        # Additional checks for other URL formats
-        if 'youtube.com' in url or 'youtu.be' in url or 'music.youtube.com' in url:
-            # Check for v= parameter
-            v_param = re.search(r'[?&]v=([a-zA-Z0-9_-]{11})', url)
-            if v_param:
-                return v_param.group(1)
-                
-            # Check for youtu.be/ format
-            short_url = re.search(r'youtu\.be\/([a-zA-Z0-9_-]{11})', url)
-            if short_url:
-                return short_url.group(1)
-                
-            # Check for music.youtube.com
-            music_url = re.search(r'music\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})', url)
-            if music_url:
-                return music_url.group(1)
-        
         return None
 
     async def is_youtube_url(self, url):
@@ -351,41 +336,44 @@ class Music(commands.Cog):
         except Exception as e:
             print(f"Direct search error: {str(e)}")
             return []
-
+            
     async def play_song(self, ctx, url):
         """Play a song using multiple fallback methods"""
         try:
-            # First determine if this is a YouTube URL
             is_youtube = await self.is_youtube_url(url)
-            
+            video_id = None
             if is_youtube:
-                # Extract the YouTube video ID
                 video_id = await self.extract_youtube_id(url)
                 if not video_id:
                     await ctx.send("❌ Could not extract YouTube video ID")
                     return
-                
-                # Check cache first
+
                 cached_url = await self.get_cached_stream(video_id)
                 if cached_url:
-                    stream_data = {'url': cached_url, 'title': self.current_songs.get(str(ctx.guild.id), 'Cached Song')}
+                    stream_data = {'url': cached_url, 'title': self.current_songs.get(str(ctx.guild.id)), 'is_local': False}
                 else:
-                    await ctx.send("🔍 Getting stream from YouTube...")
-                    
-                    # Try each method in sequence
-                    stream_data = None
-                    
-                    # 1. Try with yt-dlp first (most reliable)
-                    try:
-                        with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-                            if 'url' in info:
-                                stream_data = {
-                                    'url': info['url'],
-                                    'title': info.get('title', 'Unknown Title')
-                                }
-                    except Exception as ydl_error:
-                        print(f"yt-dlp error: {str(ydl_error)}")
+                    if is_youtube:
+                        await ctx.send("🔍 Getting stream from YouTube...")
+                        stream_data = None
+                        try:
+                            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+                                # Extrair o URL do formato de áudio correto
+                                best_audio = next(
+                                    (fmt for fmt in info.get('formats', []) 
+                                    if fmt.get('acodec') != 'none' and fmt.get('vcodec') == 'none'),
+                                    None
+                                )
+                                if best_audio:
+                                    stream_data = {
+                                        'url': best_audio['url'],
+                                        'title': info.get('title', 'Unknown Title'),
+                                        'is_local': False
+                                    }
+                                else:
+                                    raise Exception("No audio stream found in formats")
+                        except Exception as ydl_error:
+                            print(f"yt-dlp error: {str(ydl_error)}")
                     
                     # 2. If yt-dlp failed, try Piped API
                     if not stream_data:
