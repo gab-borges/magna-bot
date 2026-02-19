@@ -59,7 +59,18 @@ class Latex(commands.Cog):
         text = self.display_dollar_pattern.sub(to_display, text)
         return text
 
-    def render_mixed_text(self, text):
+    def _width_to_inches(self, width):
+        """Convert a LaTeX width string (e.g. '16cm') to inches for matplotlib figsize"""
+        conversions = {'cm': 0.3937, 'in': 1.0, 'mm': 0.03937, 'pt': 1/72}
+        for unit, factor in conversions.items():
+            if width.endswith(unit):
+                try:
+                    return float(width[:-len(unit)]) * factor
+                except ValueError:
+                    break
+        return 12  # fallback
+
+    def render_mixed_text(self, text, width='32cm'):
         """Render text with both normal text and LaTeX expressions"""
         try:
             # Normalize all math delimiters to $...$
@@ -68,9 +79,11 @@ class Latex(commands.Cog):
             # Clear any existing plots
             plt.clf()
             
-            # Create figure with white background
-            fig = plt.figure(figsize=(12, 10))
-            fig.patch.set_facecolor('white')
+            # Create figure with size matching the parbox width
+            fig_width = self._width_to_inches(width) + 1  # small margin
+            fig = plt.figure(figsize=(fig_width, 10))
+            fig.patch.set_facecolor('none')
+            fig.patch.set_alpha(0)
             
             # Split text into parts and process
             parts = self.latex_pattern.split(text)
@@ -80,22 +93,21 @@ class Latex(commands.Cog):
             for i, part in enumerate(parts):
                 if i % 2 == 0:  # Normal text
                     if part.strip():
-                        latex_string += self.prepare_text(part)
-                else:  # LaTeX expression
-                    latex_string += f"${self.fix_latex_symbols(part)}$"
-            
-            # Replace newlines with LaTeX line breaks (avoids \par issues in \parbox)
-            latex_string = latex_string.replace('\n', r' \\ ')
+                        # Replace newlines with LaTeX line breaks for text
+                        latex_string += self.prepare_text(part).replace('\n', r' \\ ')
+                else:  # LaTeX expression (newlines are just whitespace in math)
+                    latex_string += f"${self.fix_latex_symbols(part.replace(chr(10), ' '))}$"
             
             # Wrap in \parbox for automatic line breaking
-            latex_string = r'\parbox{32cm}{' + latex_string + '}'
+            latex_string = r'\parbox{' + width + '}{' + latex_string + '}'
             
             # Add text with LaTeX
             plt.text(0.05, 0.95, latex_string,
                     horizontalalignment='left',
                     verticalalignment='top',
                     transform=fig.transFigure,
-                    fontsize=28)
+                    fontsize=28,
+                    color='white')
             
             # Remove axes
             plt.axis('off')
@@ -103,7 +115,7 @@ class Latex(commands.Cog):
             # Save to bytes buffer with higher DPI
             buf = io.BytesIO()
             plt.savefig(buf, format='png', bbox_inches='tight', 
-                       facecolor='white', dpi=400, pad_inches=0.2)
+                       facecolor='none', dpi=400, pad_inches=0.2, transparent=True)
             buf.seek(0)
             
             # Clear the figure
@@ -119,12 +131,23 @@ class Latex(commands.Cog):
     @commands.command(name="tex")
     async def tex(self, ctx, *, text):
         r"""Convert text with LaTeX expressions to a single image
-        Usage: %tex Your text here $latex_expression$ more text here
-        Example: %tex The area of a circle is $A = \pi r^2$ in square units"""
+        Usage: %tex [-w WIDTH] Your text here $latex_expression$ more text here
+        Example: %tex The area of a circle is $A = \pi r^2$ in square units
+        Example: %tex -w 20cm Long text that should wrap at 20cm"""
         
         try:
+            # Parse optional -w flag for parbox width
+            width = '32cm'
+            width_match = re.match(r'-w\s+(\S+)\s+', text)
+            if width_match:
+                width = width_match.group(1)
+                # Default to cm if no unit specified
+                if width.replace('.', '', 1).isdigit():
+                    width += 'cm'
+                text = text[width_match.end():]
+            
             # Render the mixed text to image
-            image_buf = self.render_mixed_text(text)
+            image_buf = self.render_mixed_text(text, width=width)
             
             # Create discord file from buffer
             file = discord.File(fp=image_buf, filename='latex.png')
