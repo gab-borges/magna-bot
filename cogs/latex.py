@@ -10,6 +10,10 @@ class Latex(commands.Cog):
         # Regular expression to match LaTeX expressions between $$
         self.latex_pattern = re.compile(r'\$([^$]+)\$')
         
+        # Patterns for display math delimiters
+        self.display_bracket_pattern = re.compile(r'\\\[(.+?)\\\]', re.DOTALL)
+        self.display_dollar_pattern = re.compile(r'\$\$(.+?)\$\$', re.DOTALL)
+        
         # Common LaTeX symbol corrections
         self.symbol_corrections = {
             r'\infin': r'\infty',
@@ -22,7 +26,7 @@ class Latex(commands.Cog):
         # Configure matplotlib to use AMS Euler font
         plt.rcParams.update({
             'text.usetex': True,
-            'text.latex.preamble': r'\usepackage{amsmath}\usepackage{amssymb}\usepackage{eulervm}',
+            'text.latex.preamble': r'\usepackage{amsmath}\usepackage{amssymb}\usepackage{stmaryrd}\usepackage{eulervm}',
             'font.family': 'euler'
         })
 
@@ -44,14 +48,28 @@ class Latex(commands.Cog):
             text = text.replace(char, f'\\{char}')
         return text
 
+    def preprocess_delimiters(self, text):
+        """Convert alternative math delimiters to $...$ format"""
+        def to_display(m):
+            return '$\\displaystyle ' + m.group(1) + '$'
+        
+        # Convert \[...\] to $\displaystyle ...$
+        text = self.display_bracket_pattern.sub(to_display, text)
+        # Convert $$...$$ to $\displaystyle ...$
+        text = self.display_dollar_pattern.sub(to_display, text)
+        return text
+
     def render_mixed_text(self, text):
         """Render text with both normal text and LaTeX expressions"""
         try:
+            # Normalize all math delimiters to $...$
+            text = self.preprocess_delimiters(text)
+
             # Clear any existing plots
             plt.clf()
             
             # Create figure with white background
-            fig = plt.figure(figsize=(12, 1.5))  # Made figure larger for complex equations
+            fig = plt.figure(figsize=(12, 10))
             fig.patch.set_facecolor('white')
             
             # Split text into parts and process
@@ -66,12 +84,18 @@ class Latex(commands.Cog):
                 else:  # LaTeX expression
                     latex_string += f"${self.fix_latex_symbols(part)}$"
             
+            # Replace newlines with LaTeX line breaks (avoids \par issues in \parbox)
+            latex_string = latex_string.replace('\n', r' \\ ')
+            
+            # Wrap in \parbox for automatic line breaking
+            latex_string = r'\parbox{32cm}{' + latex_string + '}'
+            
             # Add text with LaTeX
-            plt.text(0.5, 0.5, latex_string,
-                    horizontalalignment='center',
-                    verticalalignment='center',
+            plt.text(0.05, 0.95, latex_string,
+                    horizontalalignment='left',
+                    verticalalignment='top',
                     transform=fig.transFigure,
-                    fontsize=16)
+                    fontsize=28)
             
             # Remove axes
             plt.axis('off')
@@ -87,7 +111,10 @@ class Latex(commands.Cog):
             
             return buf
         except Exception as e:
-            raise ValueError(f"LaTeX rendering error: {str(e)}\nTry checking your LaTeX syntax and symbols.")
+            msg = f"LaTeX rendering error: {str(e)}"
+            if len(msg) > 300:
+                msg = msg[:300] + "..."
+            raise ValueError(f"{msg}\nTry checking your LaTeX syntax and symbols.")
 
     @commands.command(name="tex")
     async def tex(self, ctx, *, text):
