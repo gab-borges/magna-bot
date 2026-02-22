@@ -100,11 +100,11 @@ class TimeGuessr(commands.Cog):
         return None
 
     @commands.command(name="timeguessr", aliases=["tg"])
-    async def timeguessr(self, ctx):
+    async def timeguessr(self, ctx, tempo: int = 30):
         """
         Start a TimeGuessr game!
         An image is shown each round and players guess where/when it was taken.
-        Usage: %timeguessr
+        Usage: %timeguessr [segundos]  (padrão: 30)
         Format: país, ano  (ex: Brazil, 2016)
         """
         # Prevent multiple games in the same channel
@@ -128,7 +128,7 @@ class TimeGuessr(commands.Cog):
                     title="🌍 TimeGuessr",
                     description=(
                         "O jogo vai começar!\n"
-                        f"**{len(rounds)} rodadas** — 30 segundos cada.\n\n"
+                        f"**{len(rounds)} rodadas** — {tempo} segundos cada.\n\n"
                         "Envie seu palpite no formato: **país, ano**\n"
                         "Exemplo: `Brazil, 2016`"
                     ),
@@ -138,7 +138,7 @@ class TimeGuessr(commands.Cog):
             await asyncio.sleep(3)
 
             for i, round_data in enumerate(rounds, start=1):
-                guesses = await self.play_round(ctx, i, len(rounds), round_data)
+                guesses = await self.play_round(ctx, i, len(rounds), round_data, tempo)
                 round_scores = await self.score_round(round_data, guesses)
 
                 # Accumulate scores
@@ -165,25 +165,37 @@ class TimeGuessr(commands.Cog):
         finally:
             self.active_channels.discard(ctx.channel.id)
 
-    async def play_round(self, ctx, round_num, total_rounds, round_data):
-        """Display the image and collect guesses for 30 seconds."""
+    async def play_round(self, ctx, round_num, total_rounds, round_data, tempo=30):
+        """Display the image and collect guesses for `tempo` seconds."""
+        import time
+        deadline_unix = int(time.time()) + tempo
+
         embed = discord.Embed(
             title=f"Rodada {round_num}/{total_rounds}",
-            description="Onde e quando essa foto foi tirada?\nResponda com: **país, ano**",
+            description=(
+                "Onde e quando essa foto foi tirada?\n"
+                "Responda com: **país, ano**\n\n"
+                f"⏱️ Tempo acaba <t:{deadline_unix}:R>"
+            ),
             color=discord.Color.blue(),
         )
         embed.set_image(url=round_data["URL"])
-        embed.set_footer(text="⏱️ Você tem 30 segundos!")
         await ctx.send(embed=embed)
 
-        # Collect guesses for 30 seconds — last valid guess per player wins
+        # Collect guesses — last valid guess per player wins
         guesses = {}  # user_id -> (author, country, year)
-        deadline = asyncio.get_event_loop().time() + 30
+        deadline = asyncio.get_event_loop().time() + tempo
+        warned_10s = False
 
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 break
+
+            # Send a warning when ~10 seconds remain
+            if remaining <= 10 and not warned_10s:
+                warned_10s = True
+                await ctx.send("⏰ **10 segundos restantes!**")
 
             try:
                 msg = await self.bot.wait_for(
@@ -199,7 +211,7 @@ class TimeGuessr(commands.Cog):
                 if parsed:
                     country, year = parsed
                     guesses[msg.author.id] = (msg.author, country, year)
-                    await msg.add_reaction(":magna:")
+                    await msg.add_reaction("✅")
             except asyncio.TimeoutError:
                 continue
 
