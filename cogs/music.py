@@ -20,6 +20,22 @@ import sys
 from dotenv import load_dotenv
 import logging
 
+
+class VoiceGatewayDiagnosticHandler(logging.Handler):
+    """Captures the latest voice WebSocket close code from discord.py logs."""
+
+    close_code_pattern = re.compile(r'WebSocket closed with (\d+)')
+
+    def __init__(self, cog):
+        super().__init__(level=logging.INFO)
+        self.cog = cog
+
+    def emit(self, record):
+        message = record.getMessage()
+        match = self.close_code_pattern.search(message)
+        if match:
+            self.cog.note_voice_close_code(int(match.group(1)))
+
 # Create private directory for sensitive files
 private_dir = Path('.private')
 private_dir.mkdir(exist_ok=True)
@@ -38,6 +54,8 @@ logger = logging.getLogger('music_cog')
 # Load environment variables
 load_dotenv()
 
+MIN_DISCORD_DAVE_VERSION = (2, 7, 0)
+
 class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -47,7 +65,9 @@ class Music(commands.Cog):
         self.search_results = {}
         self.stream_cache = {}  # Cache for successful stream URLs
         self.cache_timeout = 3600  # Cache timeout in seconds (1 hour)
-        
+        self.last_voice_close_code = None
+        self.last_voice_close_time = 0.0
+
         # Create private directories
         self.private_dir = Path('.private')
         self.private_dir.mkdir(exist_ok=True)
@@ -117,10 +137,99 @@ class Music(commands.Cog):
             "https://invidious.private.coffee"
         ]
 
+        self.voice_diagnostic_handler = VoiceGatewayDiagnosticHandler(self)
+        logging.getLogger('discord.voice_state').addHandler(self.voice_diagnostic_handler)
+
     def __del__(self):
         # Clean up temporary cookie file if it exists
         if self.cookies_file and self.cookies_file.exists():
             self.cookies_file.unlink()
+
+    def cog_unload(self):
+        logging.getLogger('discord.voice_state').removeHandler(self.voice_diagnostic_handler)
+
+    def note_voice_close_code(self, code):
+        self.last_voice_close_code = code
+        self.last_voice_close_time = time.monotonic()
+
+    def voice_library_supports_current_discord_protocol(self):
+        version = getattr(discord, 'version_info', None)
+        if version is None:
+            return False
+
+        current_version = (version.major, version.minor, version.micro)
+        return current_version >= MIN_DISCORD_DAVE_VERSION
+
+    def get_recent_voice_close_code(self, max_age=30):
+        if self.last_voice_close_code is None:
+            return None
+
+        if time.monotonic() - self.last_voice_close_time > max_age:
+            return None
+
+        return self.last_voice_close_code
+
+    def build_voice_connection_error(self):
+        if not self.voice_library_supports_current_discord_protocol():
+            return (
+                f"❌ A biblioteca de voz instalada (`discord.py {discord.__version__}`) "
+                f"é incompatível com o protocolo atual do Discord. "
+                f"Atualize para `discord.py[voice]>=2.7.1` e reinstale as dependências do bot."
+            )
+
+        code = self.get_recent_voice_close_code()
+
+        if code == 4017:
+            return (
+                f"❌ O Discord recusou a conexão de voz com o código `4017`. "
+                f"Desde 2026-03-01, canais de voz comuns exigem o protocolo DAVE/E2EE, "
+                f"e a instalação atual com `discord.py {discord.__version__}` não suporta esse handshake."
+            )
+
+        if code == 4006:
+            return (
+                f"❌ O Discord encerrou o handshake de voz com o código `4006` "
+                f"(sessão inválida). Com `discord.py {discord.__version__}`, isso normalmente indica "
+                f"incompatibilidade com o protocolo de voz atual do Discord."
+            )
+
+        return "❌ Não foi possível entrar no canal de voz."
+
+    async def disconnect_voice_client(self, guild_id, guild=None):
+        vc = self.voice_clients.get(guild_id)
+        if vc is None and guild is not None:
+            vc = guild.voice_client
+
+        if vc is None:
+            return
+
+        try:
+            if vc.is_connected():
+                await vc.disconnect(force=True)
+        except Exception:
+            logger.exception("Failed to disconnect stale voice client for guild %s", guild_id)
+        finally:
+            self.voice_clients.pop(guild_id, None)
+
+    async def ensure_voice_client(self, ctx):
+        if not self.voice_library_supports_current_discord_protocol():
+            raise RuntimeError(self.build_voice_connection_error())
+
+        guild_id = str(ctx.guild.id)
+        channel = ctx.author.voice.channel
+        vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
+
+        if vc is not None and not vc.is_connected():
+            await self.disconnect_voice_client(guild_id, ctx.guild)
+            vc = None
+
+        if vc is None:
+            vc = await channel.connect(timeout=8.0)
+        elif vc.channel != channel:
+            await vc.move_to(channel)
+
+        self.voice_clients[guild_id] = vc
+        return vc
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -775,29 +884,28 @@ class Music(commands.Cog):
         try:
             if not ctx.author.voice:
                 return await ctx.send("❌ You need to be in a voice channel!")
-            
-            channel = ctx.author.voice.channel
+
             guild_id = str(ctx.guild.id)
-            
+
             try:
-                if guild_id not in self.voice_clients:
-                    # Adicione um timeout para evitar que o bot fique preso
-                    vc = await channel.connect(timeout=5.0)
-                    self.voice_clients[guild_id] = vc
-                else:
-                    vc = self.voice_clients[guild_id]
-                    if vc.channel != channel:
-                        await vc.move_to(channel)
-            # Capture a exceção específica de conexão
+                vc = await self.ensure_voice_client(ctx)
             except discord.errors.ConnectionClosed:
-                await ctx.send("❌ A conexão de voz com o Discord falhou. Verifique as permissões e tente novamente.")
+                await self.disconnect_voice_client(guild_id, ctx.guild)
+                await ctx.send(self.build_voice_connection_error())
                 return
             except asyncio.TimeoutError:
-                await ctx.send("❌ A conexão de voz demorou muito para responder. Tente novamente.")
+                await self.disconnect_voice_client(guild_id, ctx.guild)
+                await ctx.send(self.build_voice_connection_error())
+                return
+            except RuntimeError as e:
+                logger.error(f"Voice runtime error: {str(e)}")
+                await self.disconnect_voice_client(guild_id, ctx.guild)
+                await ctx.send(str(e))
                 return
             except Exception as e:
                 logger.error(f"Voice connection error: {str(e)}")
-                await ctx.send("❌ Não foi possível entrar no canal de voz.")
+                await self.disconnect_voice_client(guild_id, ctx.guild)
+                await ctx.send(self.build_voice_connection_error())
                 return
 
             if guild_id not in self.queue:
@@ -913,15 +1021,21 @@ class Music(commands.Cog):
         if not ctx.author.voice:
             return await ctx.send("Você precisa estar em um canal de voz para este teste.")
 
-        voice_channel = ctx.author.voice.channel
+        guild_id = str(ctx.guild.id)
 
         # 2. Tenta se conectar ao canal
         try:
-            vc = await voice_channel.connect(timeout=8.0)
+            vc = await self.ensure_voice_client(ctx)
+        except discord.errors.ConnectionClosed:
+            await self.disconnect_voice_client(guild_id, ctx.guild)
+            await ctx.send(self.build_voice_connection_error())
+            return
         except asyncio.TimeoutError:
-            await ctx.send("❌ A conexão demorou demais! Verifique as permissões do bot.")
+            await self.disconnect_voice_client(guild_id, ctx.guild)
+            await ctx.send(self.build_voice_connection_error())
             return
         except Exception as e:
+            await self.disconnect_voice_client(guild_id, ctx.guild)
             await ctx.send(f"❌ Falha ao conectar: {e}")
             return
 
@@ -954,8 +1068,9 @@ class Music(commands.Cog):
     async def stop(self, ctx):
         """Stop playing and clear the queue"""
         guild_id = str(ctx.guild.id)
-        if guild_id in self.voice_clients:
-            vc = self.voice_clients[guild_id]
+        vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
+        if vc:
+            self.voice_clients[guild_id] = vc
             if vc.is_playing():
                 vc.stop()
             self.queue[guild_id] = []
@@ -965,8 +1080,9 @@ class Music(commands.Cog):
     async def skip(self, ctx):
         """Skip the current song"""
         guild_id = str(ctx.guild.id)
-        if guild_id in self.voice_clients:
-            vc = self.voice_clients[guild_id]
+        vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
+        if vc:
+            self.voice_clients[guild_id] = vc
             if vc.is_playing():
                 vc.stop()
                 await ctx.send("⏭️ Skipped current song")
@@ -1001,9 +1117,8 @@ class Music(commands.Cog):
     async def leave(self, ctx):
         """Leave the voice channel"""
         guild_id = str(ctx.guild.id)
-        if guild_id in self.voice_clients:
-            await self.voice_clients[guild_id].disconnect()
-            del self.voice_clients[guild_id]
+        if guild_id in self.voice_clients or ctx.guild.voice_client:
+            await self.disconnect_voice_client(guild_id, ctx.guild)
             self.queue[guild_id] = []
             await ctx.send("👋 Left the voice channel")
 
@@ -1011,8 +1126,9 @@ class Music(commands.Cog):
     async def pause(self, ctx):
         """Pause/Resume the current song"""
         guild_id = str(ctx.guild.id)
-        if guild_id in self.voice_clients:
-            vc = self.voice_clients[guild_id]
+        vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
+        if vc:
+            self.voice_clients[guild_id] = vc
             if vc.is_playing():
                 vc.pause()
                 await ctx.send("⏸️ Paused")
