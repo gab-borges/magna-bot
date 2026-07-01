@@ -54,10 +54,10 @@ sudo pacman -S ffmpeg
 python main.py
 ```
 
-## Imagem no GitHub Container Registry
+## Imagem no Docker Hub
 
 Cada push na branch `main` publica automaticamente uma imagem ARM64 em
-`ghcr.io/gab-borges/magna-bot:latest` por meio de um runner ARM64 nativo do
+`docker.io/gabborges/magna-bot:latest` por meio de um runner ARM64 nativo do
 GitHub Actions. O servidor não precisa receber o código-fonte nem fazer o build.
 
 A imagem inclui FFmpeg para reprodução de áudio. O recurso de renderização
@@ -74,13 +74,13 @@ nano .env
 Preencha o `.env` usando as variáveis descritas em `.env.example`. Depois execute:
 
 ```bash
-podman pull ghcr.io/gab-borges/magna-bot:latest
+podman pull docker.io/gabborges/magna-bot:latest
 podman run -d \
   --name magna-bot \
   --restart=unless-stopped \
   --env-file .env \
   -v "$(pwd)/data:/app/data:U" \
-  ghcr.io/gab-borges/magna-bot:latest
+  docker.io/gabborges/magna-bot:latest
 ```
 
 O sufixo `:U` ajusta a posse do diretório persistente para o usuário não-root
@@ -94,16 +94,16 @@ podman stop magna-bot
 podman start magna-bot
 
 # Atualização depois que uma nova imagem for publicada:
-podman pull ghcr.io/gab-borges/magna-bot:latest
+podman pull docker.io/gabborges/magna-bot:latest
 podman rm -f magna-bot
 # Execute novamente o comando "podman run" acima.
 ```
 
-Se o pacote estiver privado, autentique o Podman antes do `pull` usando um
-Personal Access Token (classic) do GitHub com permissão `read:packages`:
+Se o repositório do Docker Hub estiver privado, autentique o Podman antes do
+`pull` usando um access token do Docker Hub:
 
 ```bash
-printf '%s' "$GHCR_TOKEN" | podman login ghcr.io -u gab-borges --password-stdin
+printf '%s' "$DOCKERHUB_TOKEN" | podman login docker.io -u gabborges --password-stdin
 ```
 
 O `.env` e os cookies não são copiados para a imagem. `birthdays.json`,
