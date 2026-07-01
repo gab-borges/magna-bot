@@ -56,9 +56,9 @@ python main.py
 
 ## Imagem no GitHub Container Registry
 
-Cada push na branch `main` publica automaticamente uma imagem multi-arquitetura
-(`amd64` e `arm64`) em `ghcr.io/gab-borges/magna-bot:latest` por meio do GitHub
-Actions. O servidor não precisa receber o código-fonte nem fazer o build.
+Cada push na branch `main` publica automaticamente uma imagem ARM64 em
+`ghcr.io/gab-borges/magna-bot:latest` por meio de um runner ARM64 nativo do
+GitHub Actions. O servidor não precisa receber o código-fonte nem fazer o build.
 
 A imagem inclui FFmpeg para reprodução de áudio. O recurso de renderização
 LaTeX foi removido para evitar centenas de megabytes de dependências adicionais.
