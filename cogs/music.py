@@ -61,6 +61,9 @@ class Music(commands.Cog):
         self.bot = bot
         self.voice_clients = {}
         self.current_songs = {}
+        self.current_urls = {}
+        self.loop_enabled = {}
+        self.skip_requested = set()
         self.queue = {}
         self.search_results = {}
         self.stream_cache = {}  # Cache for successful stream URLs
@@ -99,6 +102,11 @@ class Music(commands.Cog):
             'fragment_retries': 5,
             'extract_flat': 'in_playlist',
             'concurrent_fragment_downloads': 5,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android']
+                }
+            },
             'cookiefile': str(self.cookies_file) if self.cookies_file.exists() else None,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -112,8 +120,8 @@ class Music(commands.Cog):
         
         # FFMPEG options with more robust settings
         self.FFMPEG_OPTIONS = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -loglevel warning',
-            'options': '-vn -bufsize 64k',
+            'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_at_eof 1 -reconnect_on_network_error 1 -reconnect_delay_max 5 -loglevel warning',
+            'options': '-vn -bufsize 1024k -af aresample=async=1:first_pts=0',
         }
         
         # Initialize instance lists
@@ -210,6 +218,9 @@ class Music(commands.Cog):
             logger.exception("Failed to disconnect stale voice client for guild %s", guild_id)
         finally:
             self.voice_clients.pop(guild_id, None)
+            self.current_urls.pop(guild_id, None)
+            self.loop_enabled.pop(guild_id, None)
+            self.skip_requested.discard(guild_id)
 
     async def ensure_voice_client(self, ctx):
         if not self.voice_library_supports_current_discord_protocol():
@@ -236,9 +247,16 @@ class Music(commands.Cog):
         print(f"{__name__} is online!")
 
     async def play_next(self, ctx):
-        if str(ctx.guild.id) in self.queue and self.queue[str(ctx.guild.id)]:
+        guild_id = str(ctx.guild.id)
+        if guild_id in self.skip_requested:
+            self.skip_requested.remove(guild_id)
+        elif self.loop_enabled.get(guild_id) and self.current_urls.get(guild_id):
+            await self.play_song(ctx, self.current_urls[guild_id])
+            return
+
+        if guild_id in self.queue and self.queue[guild_id]:
             # Get next song from queue
-            url = self.queue[str(ctx.guild.id)].pop(0)
+            url = self.queue[guild_id].pop(0)
             await self.play_song(ctx, url)
 
     async def extract_youtube_id(self, url):
@@ -328,10 +346,56 @@ class Music(commands.Cog):
 
     async def cache_stream(self, video_id, stream_url):
         """Cache stream URL with timestamp"""
+        if not self.is_valid_stream_url(stream_url):
+            logger.warning(f"Refusing to cache invalid stream URL for video {video_id}")
+            return
+
         self.stream_cache[video_id] = {
             'url': stream_url,
             'timestamp': time.time()
         }
+
+    def is_valid_stream_url(self, stream_url):
+        """Return True when a stream URL is non-empty and has a usable shape."""
+        if not isinstance(stream_url, str):
+            return False
+
+        stream_url = stream_url.strip()
+        if not stream_url:
+            return False
+
+        parsed = urllib.parse.urlparse(stream_url)
+        if parsed.scheme in ('http', 'https'):
+            return bool(parsed.netloc)
+
+        return Path(stream_url).exists()
+
+    def normalize_stream_data(self, stream_data, *, is_local=False):
+        """Validate stream data and normalize common fields."""
+        if not isinstance(stream_data, dict):
+            return None
+
+        stream_url = stream_data.get('url')
+        if not self.is_valid_stream_url(stream_url):
+            logger.warning(f"Ignoring invalid stream data: {stream_data}")
+            return None
+
+        normalized = stream_data.copy()
+        normalized['url'] = stream_url.strip()
+        normalized['title'] = normalized.get('title') or 'Unknown Title'
+        if is_local:
+            normalized['is_local'] = True
+
+        return normalized
+
+    def find_downloaded_audio(self, video_id):
+        """Find a downloaded audio file for a video ID regardless of final extension."""
+        candidates = sorted(
+            self.cache_dir.glob(f"{video_id}.*"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True
+        )
+        return candidates[0] if candidates else None
 
     async def get_direct_stream(self, video_id):
         """Get stream URL directly from YouTube frontend"""
@@ -360,11 +424,12 @@ class Music(commands.Cog):
                             # Try to find audio stream URL
                             formats = data.get('streamingData', {}).get('adaptiveFormats', [])
                             for fmt in formats:
-                                if fmt.get('mimeType', '').startswith('audio/'):
-                                    return {
+                                stream_url = fmt.get('url')
+                                if fmt.get('mimeType', '').startswith('audio/') and self.is_valid_stream_url(stream_url):
+                                    return self.normalize_stream_data({
                                         'url': fmt.get('url', ''),
                                         'title': data.get('videoDetails', {}).get('title', 'Unknown Title')
-                                    }
+                                    })
             
             return None
         except Exception as e:
@@ -388,17 +453,21 @@ class Music(commands.Cog):
                     # First try to get audio streams
                     if 'audioStreams' in data and data['audioStreams']:
                         for stream in data['audioStreams']:
-                            return {
-                                'url': stream['url'],
+                            stream_data = self.normalize_stream_data({
+                                'url': stream.get('url'),
                                 'title': title
-                            }
+                            })
+                            if stream_data:
+                                return stream_data
                     
                     # If no audio streams, try video streams
                     if 'videoStreams' in data and data['videoStreams']:
-                        return {
-                            'url': data['videoStreams'][0]['url'],
+                        stream_data = self.normalize_stream_data({
+                            'url': data['videoStreams'][0].get('url'),
                             'title': title
-                        }
+                        })
+                        if stream_data:
+                            return stream_data
             except Exception as e:
                 print(f"Error with Piped instance {instance}: {str(e)}")
                 continue
@@ -422,17 +491,21 @@ class Music(commands.Cog):
                     formats = data.get('adaptiveFormats', [])
                     for fmt in formats:
                         if fmt.get('type', '').startswith('audio/'):
-                            return {
-                                'url': fmt['url'],
+                            stream_data = self.normalize_stream_data({
+                                'url': fmt.get('url'),
                                 'title': title
-                            }
+                            })
+                            if stream_data:
+                                return stream_data
                     
                     # Fallback to any format with a URL
                     if formats and 'url' in formats[0]:
-                        return {
+                        stream_data = self.normalize_stream_data({
                             'url': formats[0]['url'],
                             'title': title
-                        }
+                        })
+                        if stream_data:
+                            return stream_data
             except Exception as e:
                 print(f"Error with Invidious instance {instance}: {str(e)}")
                 continue
@@ -461,20 +534,29 @@ class Music(commands.Cog):
                 try:
                     response = requests.get(src, headers=headers, timeout=10)
                     if response.status_code == 200:
-                        data = response.json()
+                        content_type = response.headers.get('Content-Type', '')
+                        if 'application/json' in content_type:
+                            data = response.json()
+                        else:
+                            data = response.text.strip()
+
                         if isinstance(data, dict):
                             # Handle Piped API format
                             if 'audioStreams' in data and data['audioStreams']:
-                                return {
-                                    'url': data['audioStreams'][0]['url'],
+                                stream_data = self.normalize_stream_data({
+                                    'url': data['audioStreams'][0].get('url'),
                                     'title': data.get('title', 'YouTube Music Track')
-                                }
+                                })
+                                if stream_data:
+                                    return stream_data
                         elif isinstance(data, str) and data.startswith('http'):
                             # Handle direct URL response
-                            return {
+                            stream_data = self.normalize_stream_data({
                                 'url': data,
                                 'title': 'YouTube Music Track'
-                            }
+                            })
+                            if stream_data:
+                                return stream_data
                 except Exception as e:
                     print(f"Error with YT Music source {src}: {str(e)}")
                     continue
@@ -578,9 +660,13 @@ class Music(commands.Cog):
                 
                 # Check cache first
                 cached_url = await self.get_cached_stream(video_id)
-                if cached_url:
+                if self.is_valid_stream_url(cached_url):
                     stream_data = {'url': cached_url, 'title': self.current_songs.get(str(ctx.guild.id), 'Cached Song')}
                 else:
+                    if cached_url:
+                        logger.warning(f"Dropping invalid cached stream URL for video {video_id}")
+                        self.stream_cache.pop(video_id, None)
+
                     await ctx.send("🔍 Getting stream...")
                     
                     # Try each method in sequence
@@ -590,11 +676,11 @@ class Music(commands.Cog):
                     try:
                         with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
                             info = ydl.extract_info(normalized_url, download=False)
-                            if 'url' in info:
-                                stream_data = {
+                            if info and info.get('url'):
+                                stream_data = self.normalize_stream_data({
                                     'url': info['url'],
                                     'title': info.get('title', 'Unknown Title')
-                                }
+                                })
                     except Exception as e:
                         logger.error(f"yt-dlp error: {str(e)}")
                         if "Sign in to confirm you're not a bot" in str(e):
@@ -603,11 +689,11 @@ class Music(commands.Cog):
                                 try:
                                     with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
                                         info = ydl.extract_info(normalized_url, download=False)
-                                        if 'url' in info:
-                                            stream_data = {
+                                        if info and info.get('url'):
+                                            stream_data = self.normalize_stream_data({
                                                 'url': info['url'],
                                                 'title': info.get('title', 'Unknown Title')
-                                            }
+                                            })
                                 except Exception as retry_error:
                                     logger.error(f"Retry failed: {str(retry_error)}")
                     
@@ -631,11 +717,12 @@ class Music(commands.Cog):
                                         download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
                                         with yt_dlp.YoutubeDL(download_opts) as ydl:
                                             info = ydl.extract_info(normalized_url, download=True)
-                                            stream_data = {
-                                                'url': str(output_path),
+                                            downloaded_path = self.find_downloaded_audio(video_id)
+                                            stream_data = self.normalize_stream_data({
+                                                'url': str(downloaded_path or output_path),
                                                 'title': info.get('title', f"Downloaded Song"),
                                                 'is_local': True
-                                            }
+                                            }, is_local=True)
                                 
                                 if stream_data:
                                     break
@@ -646,6 +733,8 @@ class Music(commands.Cog):
                                 logger.error(f"Alternative method {method} failed: {str(e)}")
                                 continue
                     
+                    stream_data = self.normalize_stream_data(stream_data)
+
                     if not stream_data:
                         await ctx.send("❌ Unable to play this track. Please try another.")
                         return
@@ -659,15 +748,18 @@ class Music(commands.Cog):
                 try:
                     with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=False)
-                        if 'url' not in info:
+                        if not info or 'url' not in info:
                             await ctx.send("❌ Unable to process this URL.")
                             return
                         
-                        stream_data = {
+                        stream_data = self.normalize_stream_data({
                             'url': info['url'],
                             'title': info.get('title', 'Unknown Title'),
                             'is_local': False
-                        }
+                        })
+                        if not stream_data:
+                            await ctx.send("❌ Unable to process this URL.")
+                            return
                 except Exception as e:
                     logger.error(f"Non-YouTube URL processing error: {str(e)}")
                     await ctx.send("❌ Unable to process this URL.")
@@ -675,11 +767,19 @@ class Music(commands.Cog):
             
             # Create audio source and play
             try:
+                stream_data = self.normalize_stream_data(
+                    stream_data,
+                    is_local=stream_data.get('is_local', False)
+                )
+                if not stream_data:
+                    await ctx.send("❌ Unable to play this track.")
+                    return
+
                 if stream_data.get('is_local', False):
                     source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
                 else:
                     try:
-                        source = await discord.FFmpegOpusAudio.from_probe(stream_data['url'], **self.FFMPEG_OPTIONS)
+                        source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
                     except Exception as e:
                         if "403 Forbidden" in str(e):
                             await ctx.send("⚠️ Stream expired, retrying...")
@@ -690,7 +790,16 @@ class Music(commands.Cog):
                                     download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
                                     with yt_dlp.YoutubeDL(download_opts) as ydl:
                                         info = ydl.extract_info(normalized_url, download=True)
-                                        source = discord.FFmpegOpusAudio(str(output_path), **self.FFMPEG_OPTIONS)
+                                        downloaded_path = self.find_downloaded_audio(video_id)
+                                        local_stream_data = self.normalize_stream_data({
+                                            'url': str(downloaded_path or output_path),
+                                            'title': info.get('title', stream_data['title']),
+                                            'is_local': True
+                                        }, is_local=True)
+                                        if not local_stream_data:
+                                            raise Exception("Downloaded audio file was not found")
+                                        stream_data = local_stream_data
+                                        source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
                                 except Exception as dl_err:
                                     logger.error(f"Download after 403 error failed: {str(dl_err)}")
                                     raise Exception("Unable to play this track")
@@ -704,6 +813,7 @@ class Music(commands.Cog):
                 return
             
             self.current_songs[str(ctx.guild.id)] = stream_data['title']
+            self.current_urls[str(ctx.guild.id)] = url
             
             vc = self.voice_clients[str(ctx.guild.id)]
             if not vc.is_connected():
@@ -1072,8 +1182,11 @@ class Music(commands.Cog):
         if vc:
             self.voice_clients[guild_id] = vc
             if vc.is_playing():
+                self.skip_requested.add(guild_id)
                 vc.stop()
             self.queue[guild_id] = []
+            self.loop_enabled[guild_id] = False
+            self.current_urls.pop(guild_id, None)
             await ctx.send("⏹️ Stopped playing and cleared the queue")
 
     @commands.command()
@@ -1084,6 +1197,7 @@ class Music(commands.Cog):
         if vc:
             self.voice_clients[guild_id] = vc
             if vc.is_playing():
+                self.skip_requested.add(guild_id)
                 vc.stop()
                 await ctx.send("⏭️ Skipped current song")
             else:
@@ -1113,6 +1227,20 @@ class Music(commands.Cog):
                 
         await ctx.send(embed=embed)
 
+    @commands.command(name="loop")
+    async def loop_track(self, ctx):
+        """Toggle looping for the current song"""
+        guild_id = str(ctx.guild.id)
+        vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
+
+        if not vc or not (vc.is_playing() or vc.is_paused()) or guild_id not in self.current_urls:
+            await ctx.send("Nothing is playing!")
+            return
+
+        self.loop_enabled[guild_id] = not self.loop_enabled.get(guild_id, False)
+        status = "enabled" if self.loop_enabled[guild_id] else "disabled"
+        await ctx.send(f"🔁 Loop {status}")
+
     @commands.command()
     async def leave(self, ctx):
         """Leave the voice channel"""
@@ -1120,6 +1248,9 @@ class Music(commands.Cog):
         if guild_id in self.voice_clients or ctx.guild.voice_client:
             await self.disconnect_voice_client(guild_id, ctx.guild)
             self.queue[guild_id] = []
+            self.loop_enabled[guild_id] = False
+            self.current_urls.pop(guild_id, None)
+            self.skip_requested.discard(guild_id)
             await ctx.send("👋 Left the voice channel")
 
     @commands.command()

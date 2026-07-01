@@ -1,8 +1,14 @@
-FROM python:3.11-slim
+FROM docker.io/library/python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DATA_DIR=/app/data
 
 # Install system dependencies including LaTeX
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    libopus0 \
     texlive-latex-base \
     texlive-latex-extra \
     texlive-latex-recommended \
@@ -17,13 +23,17 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-COPY cookies.txt .
-
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application
 COPY . .
 
-CMD ["python", "main.py"]
+RUN mkdir -p /app/data /app/.private/temp_audio \
+    && useradd --create-home --uid 10001 bot \
+    && chown -R bot:bot /app
+
+USER bot
+
+CMD ["python", "-u", "main.py"]

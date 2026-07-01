@@ -1,6 +1,13 @@
 import discord
 from discord.ext import commands, tasks
 import json
+import os
+
+DATA_DIR = os.getenv('DATA_DIR', '.')
+
+def data_file(name):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    return os.path.join(DATA_DIR, name)
 
 class MemberCount(commands.Cog):
     def __init__(self, bot):
@@ -11,13 +18,13 @@ class MemberCount(commands.Cog):
     # > Config <
     def load_config(self):
         try:
-            with open('membercount.json', 'r') as f:
+            with open(data_file('membercount.json'), 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}
 
     def save_config(self):
-        with open('membercount.json', 'w') as f:
+        with open(data_file('membercount.json'), 'w') as f:
             json.dump(self.config, f, indent=4)
 
     # > Tasks <

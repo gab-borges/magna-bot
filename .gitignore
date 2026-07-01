@@ -6,3 +6,4 @@ temp_audio/
 .private/
 *.log
 cookies.txt
+.codex

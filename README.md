@@ -61,8 +61,55 @@ sudo pacman -S ffmpeg
 python main.py
 ```
 
-## Docker 🐳
+## Imagem no GitHub Container Registry
+
+Cada push na branch `main` publica automaticamente uma imagem multi-arquitetura
+(`amd64` e `arm64`) em `ghcr.io/gab-borges/magna-bot:latest` por meio do GitHub
+Actions. O servidor não precisa receber o código-fonte nem fazer o build.
+
+No servidor, crie um diretório somente para configuração e dados:
+
 ```bash
-docker build -t magna-bot .
-docker run -d --env-file .env magna-bot
+mkdir -p ~/magna-bot/data
+cd ~/magna-bot
+nano .env
 ```
+
+Preencha o `.env` usando as variáveis descritas em `.env.example`. Depois execute:
+
+```bash
+podman pull ghcr.io/gab-borges/magna-bot:latest
+podman run -d \
+  --name magna-bot \
+  --restart=unless-stopped \
+  --env-file .env \
+  -v "$(pwd)/data:/app/data:U" \
+  ghcr.io/gab-borges/magna-bot:latest
+```
+
+O sufixo `:U` ajusta a posse do diretório persistente para o usuário não-root
+da imagem. Em um sistema com SELinux habilitado, use `:U,Z`.
+
+Comandos operacionais:
+
+```bash
+podman logs -f magna-bot
+podman stop magna-bot
+podman start magna-bot
+
+# Atualização depois que uma nova imagem for publicada:
+podman pull ghcr.io/gab-borges/magna-bot:latest
+podman rm -f magna-bot
+# Execute novamente o comando "podman run" acima.
+```
+
+Se o pacote estiver privado, autentique o Podman antes do `pull` usando um
+Personal Access Token (classic) do GitHub com permissão `read:packages`:
+
+```bash
+printf '%s' "$GHCR_TOKEN" | podman login ghcr.io -u gab-borges --password-stdin
+```
+
+O `.env` e os cookies não são copiados para a imagem. `birthdays.json`,
+`birthday_channels.json` e `membercount.json` ficam no diretório `data`, portanto
+continuam existindo quando o container for recriado.

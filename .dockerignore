@@ -1,7 +1,15 @@
+.git
+.agents
+.codex
 .env
+.env.*
+!.env.example
 .venv
 __pycache__
+*.py[cod]
 *.json
 temp_audio/
 .private/
 *.log
+cookies.txt
+youtube_cookies.txt

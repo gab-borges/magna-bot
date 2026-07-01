@@ -6,42 +6,49 @@ import pytz
 import asyncio
 import os
 
+DATA_DIR = os.getenv('DATA_DIR', '.')
+
+def data_file(name):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    return os.path.join(DATA_DIR, name)
+
 class Birthday(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Load data from environment variables instead of files
         self.birthdays = self.load_birthdays()
         self.channels = self.load_channels()
         self.check_birthdays.start()
 
     def load_birthdays(self):
         try:
-            # Load from environment variable
-            birthdays_str = os.getenv('BIRTHDAYS', '{}')
-            return json.loads(birthdays_str)
+            if os.getenv('BIRTHDAYS'):
+                return json.loads(os.environ['BIRTHDAYS'])
+            with open(data_file('birthdays.json'), 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
         except Exception as e:
             print(f"Error loading birthdays: {e}")
             return {}
 
     def save_birthdays(self):
-        # Convert dict to JSON string
-        birthdays_str = json.dumps(self.birthdays)
-        # In local development, you might want to save to a file
-        if os.getenv('DEVELOPMENT'):
-            with open('birthdays.json', 'w') as f:
-                json.dump(self.birthdays, f, indent=4)
+        with open(data_file('birthdays.json'), 'w') as f:
+            json.dump(self.birthdays, f, indent=4)
 
     def load_channels(self):
         try:
-            # Load from environment variable
-            channels_str = os.getenv('BIRTHDAY_CHANNELS', '{}')
-            return json.loads(channels_str)
+            if os.getenv('BIRTHDAY_CHANNELS'):
+                return json.loads(os.environ['BIRTHDAY_CHANNELS'])
+            with open(data_file('birthday_channels.json'), 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
         except Exception as e:
             print(f"Error loading channels: {e}")
             return {}
 
     def save_channels(self):
-        with open('birthday_channels.json', 'w') as f:
+        with open(data_file('birthday_channels.json'), 'w') as f:
             json.dump(self.channels, f, indent=4)
 
     @tasks.loop(hours=24)  # Check once per day
