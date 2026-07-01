@@ -23,11 +23,12 @@ class Latex(commands.Cog):
             r'\Sigma': r'\sum',
         }
         
-        # Configure matplotlib to use AMS Euler font
+        # Use the standard Computer Modern font. The previous Euler setup
+        # required texlive-fonts-extra, adding roughly 1 GB to the image.
         plt.rcParams.update({
             'text.usetex': True,
-            'text.latex.preamble': r'\usepackage{amsmath}\usepackage{amssymb}\usepackage{stmaryrd}\usepackage{eulervm}',
-            'font.family': 'euler'
+            'text.latex.preamble': r'\usepackage{amsmath}\usepackage{amssymb}\usepackage{stmaryrd}',
+            'font.family': 'serif'
         })
 
     @commands.Cog.listener()
@@ -161,4 +162,4 @@ class Latex(commands.Cog):
             await ctx.send(f"❌ Error: {str(e)}")
 
 async def setup(bot):
-    await bot.add_cog(Latex(bot)) 
+    await bot.add_cog(Latex(bot))

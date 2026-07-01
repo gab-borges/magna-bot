@@ -67,6 +67,10 @@ Cada push na branch `main` publica automaticamente uma imagem multi-arquitetura
 (`amd64` e `arm64`) em `ghcr.io/gab-borges/magna-bot:latest` por meio do GitHub
 Actions. O servidor não precisa receber o código-fonte nem fazer o build.
 
+A imagem ainda inclui FFmpeg e uma instalação funcional do LaTeX, portanto não
+é pequena. O pacote opcional `texlive-fonts-extra` é deliberadamente omitido
+para evitar aproximadamente 1 GB adicional.
+
 No servidor, crie um diretório somente para configuração e dados:
 
 ```bash
