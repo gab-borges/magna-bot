@@ -2,7 +2,6 @@ discord.py[voice]>=2.7.1
 aiohttp
 asyncpraw
 google-generativeai
-matplotlib
 pytz
 requests
 yt-dlp

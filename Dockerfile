@@ -5,18 +5,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DATA_DIR=/app/data
 
-# Install system dependencies including LaTeX
+# Runtime dependencies for voice playback
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libopus0 \
-    texlive-latex-base \
-    texlive-latex-extra \
-    texlive-latex-recommended \
-    texlive-fonts-recommended \
-    texlive-science \
-    texlive-pictures \
-    dvipng \
-    cm-super \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
