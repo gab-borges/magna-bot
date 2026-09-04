@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
+import html
 import re
 import traceback
 import requests
@@ -945,48 +946,120 @@ class Music(commands.Cog):
         else:
             return f"{minutes}:{seconds:02d}"
 
+    @staticmethod
+    def is_spotify_reference(value):
+        """Return whether a value is a Spotify URL or URI."""
+        value = value.strip()
+        if value.lower().startswith('spotify:'):
+            return True
+
+        parsed = urllib.parse.urlparse(value)
+        hostname = (parsed.hostname or '').lower()
+        return (
+            hostname == 'spotify.com'
+            or hostname.endswith('.spotify.com')
+            or hostname == 'spotify.link'
+            or hostname.endswith('.spotify.link')
+        )
+
+    @staticmethod
+    def normalize_spotify_track_url(value):
+        """Normalize supported Spotify track references to a web URL."""
+        value = value.strip()
+        uri_match = re.fullmatch(r'spotify:track:([A-Za-z0-9]{22})', value, re.IGNORECASE)
+        if uri_match:
+            return f"https://open.spotify.com/track/{uri_match.group(1)}"
+
+        parsed = urllib.parse.urlparse(value)
+        hostname = (parsed.hostname or '').lower()
+        if hostname == 'spotify.link' or hostname.endswith('.spotify.link'):
+            # Spotify's oEmbed endpoint follows and understands its short links.
+            return value
+
+        if not (
+            hostname == 'spotify.com'
+            or hostname.endswith('.spotify.com')
+        ):
+            return None
+
+        parts = [part for part in parsed.path.split('/') if part]
+        try:
+            track_index = parts.index('track')
+            track_id = parts[track_index + 1]
+        except (ValueError, IndexError):
+            return None
+
+        if not re.fullmatch(r'[A-Za-z0-9]{22}', track_id):
+            return None
+
+        return f"https://open.spotify.com/track/{track_id}"
+
+    @staticmethod
+    def spotify_query_from_page_title(page_title):
+        """Turn Spotify's HTML title into a useful YouTube search query."""
+        if not page_title:
+            return None
+
+        page_title = html.unescape(page_title).strip()
+        match = re.fullmatch(
+            r'(.+?)\s+-\s+song and lyrics by\s+(.+?)\s+\|\s+Spotify',
+            page_title,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+
+        track, artist = (part.strip() for part in match.groups())
+        return f"{track} {artist}" if track and artist else None
+
     async def handle_spotify_url(self, url):
-        """Extract track info from Spotify URL"""
-        # Spotify URL patterns
-        track_pattern = r'https?://[^/]*spotify\.com/track/([a-zA-Z0-9]+)'
-        
-        track_match = re.match(track_pattern, url)
-        if track_match:
-            try:
-                # Try to get the song name from the page title
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                response = requests.get(url, headers=headers)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    title = soup.title.string
-                    if title and 'Spotify' in title:
-                        # Remove "- song and lyrics | Spotify" or similar
-                        track_info = re.sub(r'\s*[-|]\s*(?:song and lyrics\s*)?(?:\|\s*)?Spotify\s*$', '', title).strip()
-                        if track_info:
-                            return track_info
+        """Resolve a Spotify track to a title/artist query for YouTube."""
+        track_url = self.normalize_spotify_track_url(url)
+        if not track_url:
+            return None
 
-            except Exception as e:
-                print(f"Error extracting Spotify title: {e}")
+        timeout = aiohttp.ClientTimeout(total=8, connect=5, sock_read=5)
+        headers = {
+            'User-Agent': self.ydl_opts['http_headers']['User-Agent'],
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
 
-            # Fallback: Try to get track name from the URL slug
-            parts = url.split('?')[0].split('/')  # Remove query parameters
-            if len(parts) > 4:
-                # The last part of the URL might contain the song name
-                track_slug = parts[-1]
-                # If there's a query string, remove it
-                if '?' in track_slug:
-                    track_slug = track_slug.split('?')[0]
-                # Convert slug to readable text
-                track_info = track_slug.replace('-', ' ').replace('_', ' ')
-                # If it's just the ID, try the previous part which might be the song name
-                if re.match(r'^[A-Za-z0-9]{22}$', track_info):
-                    if len(parts) > 5:
-                        track_info = parts[-2].replace('-', ' ').replace('_', ' ')
-                return track_info
-            
-            # If we can't get the name from the URL, at least add "spotify song" to help search
-            return "spotify song"
-        return None
+        try:
+            # Keep both metadata attempts under one deadline so a Spotify
+            # outage cannot hold the command open indefinitely.
+            async with asyncio.timeout(12):
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                    # The page title normally includes both track and artist,
+                    # which is much more accurate than searching by track ID.
+                    async with session.get(track_url, allow_redirects=True) as response:
+                        if response.status == 200:
+                            resolved_url = self.normalize_spotify_track_url(str(response.url))
+                            if resolved_url:
+                                track_url = resolved_url
+                            page = await response.text()
+                            soup = BeautifulSoup(page, 'html.parser')
+                            page_title = soup.title.string if soup.title else None
+                            search_query = self.spotify_query_from_page_title(page_title)
+                            if search_query:
+                                return search_query
+
+                    # oEmbed is an official, credential-free metadata endpoint
+                    # and a fallback when Spotify changes its HTML title.
+                    oembed_url = 'https://open.spotify.com/oembed'
+                    async with session.get(oembed_url, params={'url': track_url}) as response:
+                        if response.status != 200:
+                            return None
+
+                        metadata = await response.json(content_type=None)
+                        iframe_url = metadata.get('iframe_url', '')
+                        if '/track/' not in iframe_url:
+                            return None
+
+                        title = html.unescape(metadata.get('title', '')).strip()
+                        return title or None
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            logger.warning("Could not resolve Spotify track %s: %s", url, e)
+            return None
 
     @commands.command()
     async def play(self, ctx, *, query):
@@ -1021,10 +1094,27 @@ class Music(commands.Cog):
             if guild_id not in self.queue:
                 self.queue[guild_id] = []
 
-            spotify_info = await self.handle_spotify_url(query)
-            if spotify_info:
-                await ctx.send(f"🎵 Found Spotify track, searching...")
-                query = spotify_info
+            if self.is_spotify_reference(query):
+                await ctx.send("🎵 Resolving Spotify track...")
+                spotify_info = await self.handle_spotify_url(query)
+                if not spotify_info:
+                    return await ctx.send(
+                        "❌ I couldn't read this Spotify track. "
+                        "For now, only individual track links are supported."
+                    )
+
+                results = await self.search_youtube(spotify_info)
+                if not results:
+                    return await ctx.send("❌ I couldn't find this Spotify track on YouTube.")
+
+                selected = results[0]
+                url = selected['webpage_url']
+                if vc.is_playing() or vc.is_paused():
+                    self.queue[guild_id].append(url)
+                    await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
+                else:
+                    await self.play_song(ctx, url)
+                return
 
             url_pattern = re.compile(
                 r'^(?:http|ftp)s?://'
@@ -1037,7 +1127,7 @@ class Music(commands.Cog):
             if url_pattern.match(query):
                 is_youtube = await self.is_youtube_url(query)
                 
-                if is_youtube and 'spotify.com' not in query:
+                if is_youtube:
                     video_id = await self.extract_youtube_id(query)
                     if not video_id:
                         logger.error(f"Could not extract video ID from URL: {query}")
@@ -1053,9 +1143,6 @@ class Music(commands.Cog):
                     except Exception as e:
                         logger.error(f"YouTube playback error: {str(e)}")
                         await ctx.send("❌ Unable to play this track.")
-                elif 'spotify.com' in query:
-                    await ctx.send("⚠️ Spotify URL detected, searching...")
-                    await self.play_song(ctx, query)
                 else:
                     try:
                         if vc.is_playing():
