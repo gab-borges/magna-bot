@@ -525,8 +525,6 @@ class Music(commands.Cog):
                     logger.warning(f"Dropping invalid cached stream URL for video {video_id}")
                     self.stream_cache.pop(video_id, None)
 
-                await ctx.send("🔍 Getting stream...")
-
                 stream_data = None
                 try:
                     info = await self.extract_with_cookie_retry(lambda: self.ydl_opts, normalized_url)
