@@ -12,7 +12,7 @@ A Discord bot built with Python and discord.py that combines fun interactions wi
 - **Music Player**: Advanced music player with multiple features:
   - Play YouTube URLs (`%play [url]`)
   - Search and play songs (`%play [search term]`)
-  - Play Spotify tracks (`%play [spotify url]`)
+  - Play Spotify tracks, albums and playlists (`%play [spotify url]`)
   - Queue management (`%queue`)
   - Playback controls (`%pause`, `%stop`, `%skip`)
   - Voice channel management (`%leave`)
@@ -26,7 +26,11 @@ A Discord bot built with Python and discord.py that combines fun interactions wi
 - `%queue`: Show the current queue
 - `%leave`: Leave the voice channel
 
-Only YouTube video links, Spotify track links and search terms are accepted.
+Only YouTube video links, Spotify track, album and playlist links and search
+terms are accepted. Spotify audio is not streamed: the bot reads each track's
+name and artists from Spotify's public embed page (no account needed) and plays
+the first YouTube match. Albums and playlists queue up to 100 tracks, and each
+one is looked up on YouTube only when its turn comes.
 Playback controls (and `%play` while music is playing) only work from the bot's
 voice channel, unless the member has the *Move Members* permission.
 
@@ -65,9 +69,12 @@ python -m unittest
 
 Live checks against the real Spotify and YouTube services are skipped by
 default (and in CI). To run them, optionally with a `spotify.link` URL shared
-from the Spotify app:
+from the Spotify app and one of your playlists (the number of tracks read is
+printed):
 ```bash
-MAGNA_LIVE_TESTS=1 SPOTIFY_SHORT_LINK=https://spotify.link/... python -m unittest tests.test_spotify_live -v
+MAGNA_LIVE_TESTS=1 SPOTIFY_SHORT_LINK=https://spotify.link/... \
+  SPOTIFY_PLAYLIST_URL=https://open.spotify.com/playlist/... \
+  python -m unittest tests.test_spotify_live -v
 ```
 
 ## Imagem no Docker Hub

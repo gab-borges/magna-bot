@@ -67,10 +67,17 @@ YOUTUBE_HOSTS = {
 }
 YOUTUBE_VIDEO_ID_PATTERN = re.compile(r'[A-Za-z0-9_-]{11}')
 URL_SCHEME_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
-UNSUPPORTED_URL_MESSAGE = "❌ Only YouTube video and Spotify track links are supported."
+UNSUPPORTED_URL_MESSAGE = (
+    "❌ Only YouTube video links and Spotify track, album and playlist links are supported."
+)
 SPOTIFY_HOSTS = {'spotify.com', 'spotify.link'}
 SPOTIFY_MAX_REDIRECTS = 5
 SPOTIFY_TRACK_URL_PREFIX = "https://open.spotify.com/track/"
+SPOTIFY_ID_PATTERN = re.compile(r'[A-Za-z0-9]{22}')
+SPOTIFY_COLLECTION_KINDS = ('album', 'playlist')
+# Each queued track costs a YouTube search when its turn comes.
+SPOTIFY_COLLECTION_LIMIT = 100
+QUEUE_DISPLAY_LIMIT = 20
 NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
@@ -326,10 +333,29 @@ class Music(commands.Cog):
                 await self.play_song(ctx, self.current_urls[guild_id])
                 return
 
-            if guild_id in self.queue and self.queue[guild_id]:
-                # Get next song from queue
-                entry = self.queue[guild_id].pop(0)
-                await self.play_song(ctx, entry['url'])
+            while self.queue.get(guild_id):
+                pending = self.queue[guild_id]
+                entry = pending.pop(0)
+                url = entry.get('url') or await self.find_queued_track(ctx, entry)
+                # %stop and %leave replace the queue; don't play into a cleared one.
+                if self.queue.get(guild_id) is not pending:
+                    return
+                if not url:
+                    continue
+
+                await self.play_song(ctx, url)
+                vc = self.voice_clients.get(guild_id)
+                # Stop on success, or when there is no voice connection to play on.
+                if self.is_player_busy(vc) or vc is None or not vc.is_connected():
+                    return
+
+    async def find_queued_track(self, ctx, entry):
+        """Find the YouTube video for a track queued by name, e.g. from a playlist."""
+        results = await self.search_youtube(entry['query'])
+        if not results:
+            await ctx.send(f"❌ Couldn't find **{entry['title']}** on YouTube, skipping it.")
+            return None
+        return results[0]['webpage_url']
 
     @staticmethod
     def youtube_video_id(value):
@@ -1002,43 +1028,50 @@ class Music(commands.Cog):
         return None
 
     @staticmethod
-    def normalize_spotify_track_url(value):
-        """Normalize supported Spotify track references to a web URL."""
+    def is_spotify_short_link(value):
+        hostname = (urllib.parse.urlparse(value.strip()).hostname or '').lower()
+        return hostname == 'spotify.link' or hostname.endswith('.spotify.link')
+
+    @staticmethod
+    def spotify_entity(value, kinds):
+        """Return (kind, id) for a Spotify URL or URI of one of the given kinds."""
         value = value.strip()
-        uri_match = re.fullmatch(r'spotify:track:([A-Za-z0-9]{22})', value, re.IGNORECASE)
+        uri_match = re.fullmatch(r'spotify:([a-z]+):([A-Za-z0-9]{22})', value, re.IGNORECASE)
         if uri_match:
-            return f"https://open.spotify.com/track/{uri_match.group(1)}"
+            kind = uri_match.group(1).lower()
+            return (kind, uri_match.group(2)) if kind in kinds else None
 
         parsed = urllib.parse.urlparse(value)
         hostname = (parsed.hostname or '').lower()
-        if hostname == 'spotify.link' or hostname.endswith('.spotify.link'):
-            # Short links are resolved by following their redirects, so only
-            # accept ones that can be fetched safely.
-            return value if Music.is_fetchable_spotify_url(value) else None
-
-        if not (
-            hostname == 'spotify.com'
-            or hostname.endswith('.spotify.com')
-        ):
+        if not (hostname == 'spotify.com' or hostname.endswith('.spotify.com')):
             return None
 
         parts = [part for part in parsed.path.split('/') if part]
-        try:
-            track_index = parts.index('track')
-            track_id = parts[track_index + 1]
-        except (ValueError, IndexError):
-            return None
-
-        if not re.fullmatch(r'[A-Za-z0-9]{22}', track_id):
-            return None
-
-        return f"https://open.spotify.com/track/{track_id}"
+        for index, part in enumerate(parts[:-1]):
+            if part in kinds:
+                entity_id = parts[index + 1]
+                if SPOTIFY_ID_PATTERN.fullmatch(entity_id):
+                    return part, entity_id
+                return None
+        return None
 
     @staticmethod
-    def spotify_query_from_embed(page_html, track_id):
-        """Build a "track artists" query from the track's embed page.
+    def normalize_spotify_track_url(value):
+        """Normalize supported Spotify track references to a web URL."""
+        if Music.is_spotify_short_link(value):
+            # Short links are resolved by following their redirects, so only
+            # accept ones that can be fetched safely.
+            value = value.strip()
+            return value if Music.is_fetchable_spotify_url(value) else None
 
-        The embed page carries the track's metadata as Next.js data, including
+        entity = Music.spotify_entity(value, ('track',))
+        return f"{SPOTIFY_TRACK_URL_PREFIX}{entity[1]}" if entity else None
+
+    @staticmethod
+    def spotify_embed_entity(page_html, kind, entity_id):
+        """Return the entity described by an embed page, if it is the one asked for.
+
+        The embed page carries the entity's metadata as Next.js data, including
         every artist, which oEmbed and the regular page title don't reliably do.
         """
         script = BeautifulSoup(page_html, 'html.parser').find('script', id='__NEXT_DATA__')
@@ -1052,7 +1085,15 @@ class Music(commands.Cog):
 
         if not isinstance(entity, dict):
             return None
-        if entity.get('type') != 'track' or entity.get('uri') != f"spotify:track:{track_id}":
+        if entity.get('type') != kind or entity.get('uri') != f"spotify:{kind}:{entity_id}":
+            return None
+        return entity
+
+    @staticmethod
+    def spotify_query_from_embed(page_html, track_id):
+        """Build a "track artists" query from the track's embed page."""
+        entity = Music.spotify_embed_entity(page_html, 'track', track_id)
+        if entity is None:
             return None
 
         name = (entity.get('name') or '').strip()
@@ -1066,23 +1107,96 @@ class Music(commands.Cog):
             return None
         return " ".join([name, *artists])
 
+    @staticmethod
+    def spotify_collection_from_embed(page_html, kind, entity_id):
+        """Read an album's or playlist's name and tracks from its embed page.
+
+        Returns {'name', 'tracks'}, where each track is {'query', 'title'}, or
+        None when the page has no usable track list.
+        """
+        entity = Music.spotify_embed_entity(page_html, kind, entity_id)
+        if entity is None or not isinstance(entity.get('trackList'), list):
+            return None
+
+        tracks = []
+        for item in entity['trackList']:
+            if not isinstance(item, dict):
+                continue
+            # Skip podcast episodes and local files, which aren't on YouTube.
+            if not re.fullmatch(r'spotify:track:[A-Za-z0-9]{22}', item.get('uri') or ''):
+                continue
+
+            title = " ".join(str(item.get('title') or item.get('name') or '').split())
+            artists = " ".join(str(item.get('subtitle') or '').split())
+            if not artists and isinstance(item.get('artists'), list):
+                artists = ", ".join(
+                    artist['name'].strip()
+                    for artist in item['artists']
+                    if isinstance(artist, dict) and isinstance(artist.get('name'), str)
+                )
+            if not title:
+                continue
+
+            tracks.append({
+                'query': f"{title} {artists}".strip(),
+                'title': f"{title} — {artists}" if artists else title,
+            })
+
+        if not tracks:
+            return None
+        name = " ".join(str(entity.get('name') or entity.get('title') or '').split())
+        return {'name': name or kind.capitalize(), 'tracks': tracks}
+
+    def spotify_session(self):
+        timeout = aiohttp.ClientTimeout(total=8, connect=5, sock_read=5)
+        headers = {
+            'User-Agent': self.ydl_opts['http_headers']['User-Agent'],
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        return aiohttp.ClientSession(timeout=timeout, headers=headers)
+
+    async def follow_spotify_short_link(self, url):
+        """Return the Spotify URL a spotify.link short link points to, or None."""
+        if not self.is_fetchable_spotify_url(url.strip()):
+            return None
+        try:
+            async with asyncio.timeout(12):
+                async with self.spotify_session() as session:
+                    page = await self.fetch_spotify_page(session, url.strip())
+                    return page[0] if page else None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning("Could not resolve Spotify short link %s: %s", url, e)
+            return None
+
+    async def handle_spotify_collection_url(self, url):
+        """Resolve a Spotify album or playlist to its name and tracks."""
+        entity = self.spotify_entity(url, SPOTIFY_COLLECTION_KINDS)
+        if entity is None:
+            return None
+
+        kind, entity_id = entity
+        embed_url = f"https://open.spotify.com/embed/{kind}/{entity_id}"
+        try:
+            async with asyncio.timeout(12):
+                async with self.spotify_session() as session:
+                    page = await self.fetch_spotify_page(session, embed_url)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            logger.warning("Could not resolve Spotify %s %s: %s", kind, url, e)
+            return None
+
+        return page and self.spotify_collection_from_embed(page[1], kind, entity_id)
+
     async def handle_spotify_url(self, url):
         """Resolve a Spotify track to a title/artist query for YouTube."""
         track_url = self.normalize_spotify_track_url(url)
         if not track_url:
             return None
 
-        timeout = aiohttp.ClientTimeout(total=8, connect=5, sock_read=5)
-        headers = {
-            'User-Agent': self.ydl_opts['http_headers']['User-Agent'],
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-
         try:
             # Keep every metadata attempt under one deadline so a Spotify
             # outage cannot hold the command open indefinitely.
             async with asyncio.timeout(12):
-                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with self.spotify_session() as session:
                     if not track_url.startswith(SPOTIFY_TRACK_URL_PREFIX):
                         # A short link: follow it to find out which track it is.
                         page = await self.fetch_spotify_page(session, track_url)
@@ -1117,6 +1231,60 @@ class Music(commands.Cog):
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
             logger.warning("Could not resolve Spotify track %s: %s", url, e)
             return None
+
+    async def play_spotify(self, ctx, vc, reference):
+        """Play a Spotify track, or queue every track of an album or playlist."""
+        if self.is_spotify_short_link(reference):
+            await ctx.send("🎵 Resolving Spotify link...")
+            reference = await self.follow_spotify_short_link(reference) or reference
+
+        if self.spotify_entity(reference, SPOTIFY_COLLECTION_KINDS):
+            await ctx.send("🎵 Reading Spotify tracks...")
+            collection = await self.handle_spotify_collection_url(reference)
+            if not collection:
+                return await ctx.send("❌ I couldn't read the tracks of this Spotify album or playlist.")
+            return await self.enqueue_spotify_collection(ctx, vc, collection)
+
+        await ctx.send("🎵 Resolving Spotify track...")
+        spotify_info = await self.handle_spotify_url(reference)
+        if not spotify_info:
+            return await ctx.send(
+                "❌ I couldn't read this Spotify track. "
+                "Only track, album and playlist links are supported."
+            )
+
+        results = await self.search_youtube(spotify_info)
+        if not results:
+            return await ctx.send("❌ I couldn't find this Spotify track on YouTube.")
+
+        selected = results[0]
+        if await self.play_or_enqueue(ctx, vc, selected['webpage_url'], selected['title']):
+            await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
+
+    async def enqueue_spotify_collection(self, ctx, vc, collection):
+        """Queue an album's or playlist's tracks by name and start playing if idle.
+
+        Each track is looked up on YouTube only when its turn comes, so a long
+        playlist doesn't fire a burst of searches.
+        """
+        guild_id = str(ctx.guild.id)
+        tracks = collection['tracks'][:SPOTIFY_COLLECTION_LIMIT]
+        entries = [
+            {'url': None, 'query': track['query'], 'title': track['title']}
+            for track in tracks
+        ]
+
+        async with self.playback_lock(guild_id):
+            self.queue.setdefault(guild_id, []).extend(entries)
+            idle = not self.is_player_busy(vc)
+
+        message = f"🎵 Added {len(entries)} tracks from **{collection['name']}** to the queue"
+        if len(collection['tracks']) > len(tracks):
+            message += f" (only the first {SPOTIFY_COLLECTION_LIMIT})"
+        await ctx.send(message)
+
+        if idle:
+            await self.play_next(ctx)
 
     @commands.command()
     async def play(self, ctx, *, query):
@@ -1159,22 +1327,7 @@ class Music(commands.Cog):
                 self.queue[guild_id] = []
 
             if self.is_spotify_reference(query):
-                await ctx.send("🎵 Resolving Spotify track...")
-                spotify_info = await self.handle_spotify_url(query)
-                if not spotify_info:
-                    return await ctx.send(
-                        "❌ I couldn't read this Spotify track. "
-                        "For now, only individual track links are supported."
-                    )
-
-                results = await self.search_youtube(spotify_info)
-                if not results:
-                    return await ctx.send("❌ I couldn't find this Spotify track on YouTube.")
-
-                selected = results[0]
-                if await self.play_or_enqueue(ctx, vc, selected['webpage_url'], selected['title']):
-                    await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
-                return
+                return await self.play_spotify(ctx, vc, query)
 
             if URL_SCHEME_PATTERN.match(query):
                 url = self.normalize_youtube_url(query)
@@ -1340,8 +1493,12 @@ class Music(commands.Cog):
             embed.add_field(name="Now Playing", value=self.current_songs[guild_id], inline=False)
         
         # Titles are stored when songs are queued, so listing needs no network.
-        for i, entry in enumerate(self.queue[guild_id], 1):
+        entries = self.queue[guild_id]
+        for i, entry in enumerate(entries[:QUEUE_DISPLAY_LIMIT], 1):
             embed.add_field(name=f"{i}. ", value=entry['title'], inline=False)
+        # Embeds hold at most 25 fields, and a playlist can queue far more.
+        if len(entries) > QUEUE_DISPLAY_LIMIT:
+            embed.set_footer(text=f"…and {len(entries) - QUEUE_DISPLAY_LIMIT} more")
 
         await ctx.send(embed=embed)
 

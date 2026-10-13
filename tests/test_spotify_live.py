@@ -6,7 +6,8 @@ depend on third-party services. Run them with:
     MAGNA_LIVE_TESTS=1 python -m unittest tests.test_spotify_live -v
 
 Set SPOTIFY_SHORT_LINK to a spotify.link URL shared from the Spotify app to
-also check short-link resolution.
+also check short-link resolution, and SPOTIFY_PLAYLIST_URL to check one of
+your own playlists (the number of tracks read is printed).
 """
 import os
 import unittest
@@ -57,6 +58,34 @@ class SpotifyLiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.music.handle_spotify_url(
             "https://open.spotify.com/album/1ATL5GLyefJaxhQzSPVrLX"
         ))
+
+    def assert_collection(self, collection):
+        self.assertIsNotNone(collection)
+        self.assertTrue(collection['name'])
+        self.assertTrue(collection['tracks'])
+        for track in collection['tracks']:
+            self.assertTrue(track['query'].strip())
+            self.assertTrue(track['title'].strip())
+
+    async def test_reads_album_tracks(self):
+        collection = await self.music.handle_spotify_collection_url(
+            "https://open.spotify.com/album/1ATL5GLyefJaxhQzSPVrLX"
+        )
+        self.assert_collection(collection)
+
+    async def test_reads_spotify_editorial_playlist(self):
+        # "Today's Top Hits": the official Web API no longer lists the tracks
+        # of playlists the caller doesn't own, so this checks the embed path.
+        collection = await self.music.handle_spotify_collection_url(
+            "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+        )
+        self.assert_collection(collection)
+
+    @unittest.skipUnless(os.getenv('SPOTIFY_PLAYLIST_URL'), "set SPOTIFY_PLAYLIST_URL to check a playlist")
+    async def test_reads_given_playlist(self):
+        collection = await self.music.handle_spotify_collection_url(os.environ['SPOTIFY_PLAYLIST_URL'])
+        self.assert_collection(collection)
+        print(f"\n{collection['name']}: read {len(collection['tracks'])} tracks")
 
     @unittest.skipUnless(os.getenv('SPOTIFY_SHORT_LINK'), "set SPOTIFY_SHORT_LINK to check short links")
     async def test_resolves_short_link(self):
