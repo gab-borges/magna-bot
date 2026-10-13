@@ -1,13 +1,10 @@
 import discord
 from discord.ext import commands, tasks
-import json
-import os
+import logging
 
-DATA_DIR = os.getenv('DATA_DIR', '.')
+from magna.storage import data_file, load_json, save_json
 
-def data_file(name):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    return os.path.join(DATA_DIR, name)
+logger = logging.getLogger(__name__)
 
 class MemberCount(commands.Cog):
     def __init__(self, bot):
@@ -17,15 +14,10 @@ class MemberCount(commands.Cog):
 
     # > Config <
     def load_config(self):
-        try:
-            with open(data_file('membercount.json'), 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
+        return load_json(data_file('membercount.json'), {})
 
     def save_config(self):
-        with open(data_file('membercount.json'), 'w') as f:
-            json.dump(self.config, f, indent=4)
+        save_json(data_file('membercount.json'), self.config)
 
     # > Tasks <
     @tasks.loop(minutes=30)
@@ -46,18 +38,14 @@ class MemberCount(commands.Cog):
                 if channel.name != new_name:
                     await channel.edit(name=new_name)
             
-            except Exception as e:
-                print(f"Error on channel update: {e}")
+            except Exception:
+                logger.exception("Error updating the member count channel of guild %s", guild_id)
 
     @update_channel.before_loop
     async def before_update(self):
         await self.bot.wait_until_ready()
 
     # > Commands <
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"{__name__} is online!")
-
     @commands.command()
     @commands.has_permissions(administrator=True)
     async def setmembercount(self, ctx, channel: discord.VoiceChannel):

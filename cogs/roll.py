@@ -8,10 +8,6 @@ class Roll(commands.Cog):
         self.bot = bot
         self.dice_pattern = re.compile(r'(\d+)d(\d+)([+-]\d+)?')
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"{__name__} is online!")
-
     @commands.command()
     async def roll(self, ctx, *, dice_expression: str):
         """Roll dice using the format XdY+Z

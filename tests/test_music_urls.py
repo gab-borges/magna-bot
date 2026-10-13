@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
 from cogs.music import Music
+from magna import youtube
 from tests.music_helpers import make_ctx, make_music, make_voice_client, sent_text
 
 VIDEO_ID = "dQw4w9WgXcQ"
@@ -24,7 +25,7 @@ class YouTubeUrlNormalizationTests(unittest.TestCase):
         ]
         for url in urls:
             with self.subTest(url=url):
-                self.assertEqual(Music.normalize_youtube_url(url), CANONICAL)
+                self.assertEqual(youtube.normalize_url(url), CANONICAL)
 
     def test_rejects_non_youtube_hosts(self):
         urls = [
@@ -38,7 +39,7 @@ class YouTubeUrlNormalizationTests(unittest.TestCase):
         ]
         for url in urls:
             with self.subTest(url=url):
-                self.assertIsNone(Music.normalize_youtube_url(url))
+                self.assertIsNone(youtube.normalize_url(url))
 
     def test_rejects_youtube_urls_without_a_video_id(self):
         urls = [
@@ -48,7 +49,7 @@ class YouTubeUrlNormalizationTests(unittest.TestCase):
         ]
         for url in urls:
             with self.subTest(url=url):
-                self.assertIsNone(Music.normalize_youtube_url(url))
+                self.assertIsNone(youtube.normalize_url(url))
 
 
 class PlayCommandUrlTests(unittest.IsolatedAsyncioTestCase):

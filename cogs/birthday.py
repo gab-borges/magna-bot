@@ -1,16 +1,15 @@
 import discord
 from discord.ext import commands, tasks
 import json
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 import pytz
 import asyncio
+import logging
 import os
 
-DATA_DIR = os.getenv('DATA_DIR', '.')
+from magna.storage import data_file, load_json, save_json
 
-def data_file(name):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    return os.path.join(DATA_DIR, name)
+logger = logging.getLogger(__name__)
 
 class Birthday(commands.Cog):
     def __init__(self, bot):
@@ -23,33 +22,25 @@ class Birthday(commands.Cog):
         try:
             if os.getenv('BIRTHDAYS'):
                 return json.loads(os.environ['BIRTHDAYS'])
-            with open(data_file('birthdays.json'), 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
-        except Exception as e:
-            print(f"Error loading birthdays: {e}")
+            return load_json(data_file('birthdays.json'), {})
+        except Exception:
+            logger.exception("Error loading birthdays")
             return {}
 
     def save_birthdays(self):
-        with open(data_file('birthdays.json'), 'w') as f:
-            json.dump(self.birthdays, f, indent=4)
+        save_json(data_file('birthdays.json'), self.birthdays)
 
     def load_channels(self):
         try:
             if os.getenv('BIRTHDAY_CHANNELS'):
                 return json.loads(os.environ['BIRTHDAY_CHANNELS'])
-            with open(data_file('birthday_channels.json'), 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
-        except Exception as e:
-            print(f"Error loading channels: {e}")
+            return load_json(data_file('birthday_channels.json'), {})
+        except Exception:
+            logger.exception("Error loading birthday channels")
             return {}
 
     def save_channels(self):
-        with open(data_file('birthday_channels.json'), 'w') as f:
-            json.dump(self.channels, f, indent=4)
+        save_json(data_file('birthday_channels.json'), self.channels)
 
     @tasks.loop(hours=24)  # Check once per day
     async def check_birthdays(self):
@@ -72,8 +63,8 @@ class Birthday(commands.Cog):
                             if channel:
                                 await channel.send(embed=embed)
                                 
-        except Exception as e:
-            print(f"[ERROR] Error in check_birthdays: {str(e)}")
+        except Exception:
+            logger.exception("Error in check_birthdays")
 
     @check_birthdays.before_loop
     async def before_check(self):
@@ -84,10 +75,6 @@ class Birthday(commands.Cog):
         if current_time >= next_run:
             next_run = next_run + timedelta(days=1)
         await asyncio.sleep((next_run - current_time).total_seconds())
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"{__name__} is online!")
 
     @commands.group(invoke_without_command=True)
     async def birthday(self, ctx):
