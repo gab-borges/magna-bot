@@ -1,8 +1,8 @@
 import unittest
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 from cogs.music import Music
+from tests.music_helpers import make_ctx, make_music, make_voice_client
 
 
 class SpotifyReferenceTests(unittest.TestCase):
@@ -59,9 +59,7 @@ class SpotifyReferenceTests(unittest.TestCase):
 
 class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
     async def test_spotify_track_plays_first_youtube_match_without_prompt(self):
-        music = Music.__new__(Music)
-        music.cookies_file = None
-        music.queue = {}
+        music = make_music()
         music.ensure_voice_client = AsyncMock()
         music.handle_spotify_url = AsyncMock(return_value="Track Artist")
         music.search_youtube = AsyncMock(return_value=[{
@@ -70,16 +68,10 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         }])
         music.play_song = AsyncMock()
 
-        voice_client = Mock()
-        voice_client.is_playing.return_value = False
-        voice_client.is_paused.return_value = False
+        voice_client = make_voice_client()
         music.ensure_voice_client.return_value = voice_client
 
-        ctx = SimpleNamespace(
-            author=SimpleNamespace(voice=object()),
-            guild=SimpleNamespace(id=123),
-            send=AsyncMock(),
-        )
+        ctx = make_ctx(voice_client=voice_client)
 
         await Music.play.callback(
             music,

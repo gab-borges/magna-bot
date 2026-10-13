@@ -68,6 +68,7 @@ YOUTUBE_HOSTS = {
 YOUTUBE_VIDEO_ID_PATTERN = re.compile(r'[A-Za-z0-9_-]{11}')
 URL_SCHEME_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
 UNSUPPORTED_URL_MESSAGE = "❌ Only YouTube video and Spotify track links are supported."
+NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -79,6 +80,7 @@ class Music(commands.Cog):
         self.skip_requested = set()
         self.queue = {}
         self.search_results = {}
+        self.playback_locks = {}
         self.stream_cache = {}  # Cache for successful stream URLs
         self.cache_timeout = 3600  # Cache timeout in seconds (1 hour)
         self.last_voice_close_code = None
@@ -258,18 +260,63 @@ class Music(commands.Cog):
     async def on_ready(self):
         print(f"{__name__} is online!")
 
+    @staticmethod
+    def is_player_busy(vc):
+        """A paused track still owns the player, so treat it like a playing one."""
+        return vc is not None and (vc.is_playing() or vc.is_paused())
+
+    def playback_lock(self, guild_id):
+        """Serialize "is anything playing? then start a track" per guild."""
+        return self.playback_locks.setdefault(guild_id, asyncio.Lock())
+
+    @staticmethod
+    def can_control_player(ctx, vc):
+        """Only listeners in the bot's voice channel (or moderators) may control it."""
+        if vc is None or not vc.is_connected():
+            return True
+        if ctx.author.guild_permissions.move_members:
+            return True
+        author_channel = ctx.author.voice.channel if ctx.author.voice else None
+        return author_channel == vc.channel
+
+    async def play_or_enqueue(self, ctx, vc, url):
+        """Start the track right away, or queue it when the player is busy.
+
+        Returns True when the track was queued.
+        """
+        guild_id = str(ctx.guild.id)
+        async with self.playback_lock(guild_id):
+            if self.is_player_busy(vc):
+                self.queue.setdefault(guild_id, []).append(url)
+                return True
+            await self.play_song(ctx, url)
+            return False
+
+    def after_playback(self, ctx, error):
+        """Called from discord.py's audio thread when a track ends."""
+        if error:
+            logger.error(f"Playback error in guild {ctx.guild.id}: {error}")
+        # Don't block the audio thread while the next track is resolved.
+        asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
+
     async def play_next(self, ctx):
         guild_id = str(ctx.guild.id)
-        if guild_id in self.skip_requested:
-            self.skip_requested.remove(guild_id)
-        elif self.loop_enabled.get(guild_id) and self.current_urls.get(guild_id):
-            await self.play_song(ctx, self.current_urls[guild_id])
-            return
+        async with self.playback_lock(guild_id):
+            skipped = guild_id in self.skip_requested
+            self.skip_requested.discard(guild_id)
 
-        if guild_id in self.queue and self.queue[guild_id]:
-            # Get next song from queue
-            url = self.queue[guild_id].pop(0)
-            await self.play_song(ctx, url)
+            # A command may have started another track while we waited.
+            if self.is_player_busy(self.voice_clients.get(guild_id)):
+                return
+
+            if not skipped and self.loop_enabled.get(guild_id) and self.current_urls.get(guild_id):
+                await self.play_song(ctx, self.current_urls[guild_id])
+                return
+
+            if guild_id in self.queue and self.queue[guild_id]:
+                # Get next song from queue
+                url = self.queue[guild_id].pop(0)
+                await self.play_song(ctx, url)
 
     @staticmethod
     def youtube_video_id(value):
@@ -758,8 +805,7 @@ class Music(commands.Cog):
                 await ctx.send("❌ Voice connection lost.")
                 return
             
-            vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(
-                self.play_next(ctx), self.bot.loop).result())
+            vc.play(source, after=lambda e: self.after_playback(ctx, e))
             
             embed = discord.Embed(
                 title="🎵 Now Playing",
@@ -1007,6 +1053,13 @@ class Music(commands.Cog):
 
             guild_id = str(ctx.guild.id)
 
+            # Don't let someone in another channel pull the bot away from
+            # people who are still listening.
+            current_vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
+            in_use = self.is_player_busy(current_vc) or self.queue.get(guild_id)
+            if in_use and not self.can_control_player(ctx, current_vc):
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
+
             try:
                 vc = await self.ensure_voice_client(ctx)
             except discord.errors.ConnectionClosed:
@@ -1045,12 +1098,8 @@ class Music(commands.Cog):
                     return await ctx.send("❌ I couldn't find this Spotify track on YouTube.")
 
                 selected = results[0]
-                url = selected['webpage_url']
-                if vc.is_playing() or vc.is_paused():
-                    self.queue[guild_id].append(url)
+                if await self.play_or_enqueue(ctx, vc, selected['webpage_url']):
                     await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
-                else:
-                    await self.play_song(ctx, url)
                 return
 
             if URL_SCHEME_PATTERN.match(query):
@@ -1059,13 +1108,10 @@ class Music(commands.Cog):
                     return await ctx.send(UNSUPPORTED_URL_MESSAGE)
 
                 try:
-                    if vc.is_playing():
-                        self.queue[guild_id].append(url)
+                    if await self.play_or_enqueue(ctx, vc, url):
                         with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
                             info = ydl.extract_info(url, download=False)
                             await ctx.send(f"🎵 Added to queue: **{info['title']}**")
-                    else:
-                        await self.play_song(ctx, url)
                 except Exception as e:
                     logger.error(f"YouTube playback error: {str(e)}")
                     await ctx.send("❌ Unable to play this track.")
@@ -1108,13 +1154,8 @@ class Music(commands.Cog):
                         return await ctx.send("❌ Search cancelled.")
 
                     selected = results[int(msg.content) - 1]
-                    url = selected['webpage_url']
-
-                    if vc.is_playing():
-                        self.queue[guild_id].append(url)
+                    if await self.play_or_enqueue(ctx, vc, selected['webpage_url']):
                         await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
-                    else:
-                        await self.play_song(ctx, url)
 
                 except asyncio.TimeoutError:
                     del self.search_results[ctx.author.id]
@@ -1183,13 +1224,15 @@ class Music(commands.Cog):
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
+            if not self.can_control_player(ctx, vc):
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
             self.voice_clients[guild_id] = vc
-            if vc.is_playing():
-                self.skip_requested.add(guild_id)
-                vc.stop()
             self.queue[guild_id] = []
             self.loop_enabled[guild_id] = False
             self.current_urls.pop(guild_id, None)
+            if self.is_player_busy(vc):
+                self.skip_requested.add(guild_id)
+                vc.stop()
             await ctx.send("⏹️ Stopped playing and cleared the queue")
 
     @commands.command()
@@ -1198,8 +1241,10 @@ class Music(commands.Cog):
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
+            if not self.can_control_player(ctx, vc):
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
             self.voice_clients[guild_id] = vc
-            if vc.is_playing():
+            if self.is_player_busy(vc):
                 self.skip_requested.add(guild_id)
                 vc.stop()
                 await ctx.send("⏭️ Skipped current song")
@@ -1236,9 +1281,12 @@ class Music(commands.Cog):
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
 
-        if not vc or not (vc.is_playing() or vc.is_paused()) or guild_id not in self.current_urls:
+        if not self.is_player_busy(vc) or guild_id not in self.current_urls:
             await ctx.send("Nothing is playing!")
             return
+
+        if not self.can_control_player(ctx, vc):
+            return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
 
         self.loop_enabled[guild_id] = not self.loop_enabled.get(guild_id, False)
         status = "enabled" if self.loop_enabled[guild_id] else "disabled"
@@ -1248,7 +1296,10 @@ class Music(commands.Cog):
     async def leave(self, ctx):
         """Leave the voice channel"""
         guild_id = str(ctx.guild.id)
-        if guild_id in self.voice_clients or ctx.guild.voice_client:
+        vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
+        if vc:
+            if not self.can_control_player(ctx, vc):
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
             await self.disconnect_voice_client(guild_id, ctx.guild)
             self.queue[guild_id] = []
             self.loop_enabled[guild_id] = False
@@ -1262,6 +1313,8 @@ class Music(commands.Cog):
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
+            if not self.can_control_player(ctx, vc):
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
             self.voice_clients[guild_id] = vc
             if vc.is_playing():
                 vc.pause()

@@ -26,6 +26,10 @@ A Discord bot built with Python and discord.py that combines fun interactions wi
 - `%queue`: Show the current queue
 - `%leave`: Leave the voice channel
 
+Only YouTube video links, Spotify track links and search terms are accepted.
+Playback controls (and `%play` while music is playing) only work from the bot's
+voice channel, unless the member has the *Move Members* permission.
+
 ## Setup 🚀
 
 1. Install dependencies:
