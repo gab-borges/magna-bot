@@ -50,10 +50,19 @@ def parse_guess(text):
     return (country, year)
 
 
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+
 class TimeGuessr(commands.Cog):
+    min_round_time = 10  # the 10-second warning needs at least this much
+    max_round_time = 120
+    intro_delay = 3
+    # Ends a game nobody continues, so the channel isn't locked forever.
+    reaction_timeout = 300
+
     def __init__(self, bot):
         self.bot = bot
-        self.active_channels = set()
+        self.active_games = {}  # channel_id -> {'starter_id': int, 'task': Task}
         self.api_url = "https://timeguessr.com/getDaily"
         self.country_cache = {}  # name -> (lat, lng) or None
 
@@ -63,13 +72,16 @@ class TimeGuessr(commands.Cog):
 
     async def fetch_rounds(self):
         """Fetch daily round data from TimeGuessr API."""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(self.api_url) as response:
-                if response.status != 200:
-                    return None
-                data = await response.json()
-                # The API returns a list of 5 round objects + a trailing 0
-                return [item for item in data if isinstance(item, dict)]
+        try:
+            async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+                async with session.get(self.api_url) as response:
+                    if response.status != 200:
+                        return None
+                    data = await response.json()
+                    # The API returns a list of 5 round objects + a trailing 0
+                    return [item for item in data if isinstance(item, dict)]
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return None
 
     async def geocode_country(self, country_name):
         """Get (lat, lng) for a country name via restcountries API. Cached."""
@@ -78,7 +90,7 @@ class TimeGuessr(commands.Cog):
             return self.country_cache[key]
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
                 url = f"https://restcountries.com/v3.1/name/{country_name}"
                 async with session.get(url) as response:
                     if response.status != 200:
@@ -106,13 +118,22 @@ class TimeGuessr(commands.Cog):
         An image is shown each round and players guess where/when it was taken.
         Usage: %timeguessr [segundos]  (padrão: 30)
         Format: país, ano  (ex: Brazil, 2016)
+        Use %tgstop para encerrar o jogo.
         """
+        if not self.min_round_time <= tempo <= self.max_round_time:
+            await ctx.send(
+                f"⚠️ O tempo por rodada deve ficar entre {self.min_round_time} "
+                f"e {self.max_round_time} segundos."
+            )
+            return
+
         # Prevent multiple games in the same channel
-        if ctx.channel.id in self.active_channels:
+        if ctx.channel.id in self.active_games:
             await ctx.send("⚠️ Já tem um jogo de TimeGuessr rolando nesse canal! Espere terminar.")
             return
 
-        self.active_channels.add(ctx.channel.id)
+        game = {'starter_id': ctx.author.id, 'task': asyncio.current_task()}
+        self.active_games[ctx.channel.id] = game
 
         try:
             rounds = await self.fetch_rounds()
@@ -135,7 +156,7 @@ class TimeGuessr(commands.Cog):
                     color=discord.Color.gold(),
                 )
             )
-            await asyncio.sleep(3)
+            await asyncio.sleep(self.intro_delay)
 
             for i, round_data in enumerate(rounds, start=1):
                 guesses = await self.play_round(ctx, i, len(rounds), round_data, tempo)
@@ -150,20 +171,44 @@ class TimeGuessr(commands.Cog):
                 # Wait for someone to react ✅ before next round
                 if i < len(rounds):
                     await answer_msg.add_reaction("✅")
-                    await self.bot.wait_for(
-                        "reaction_add",
-                        check=lambda reaction, user: (
-                            reaction.message.id == answer_msg.id
-                            and str(reaction.emoji) == "✅"
-                            and not user.bot
-                        ),
-                    )
+                    try:
+                        await self.bot.wait_for(
+                            "reaction_add",
+                            check=lambda reaction, user: (
+                                reaction.message.id == answer_msg.id
+                                and str(reaction.emoji) == "✅"
+                                and not user.bot
+                            ),
+                            timeout=self.reaction_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        await ctx.send("⏹️ Jogo encerrado por inatividade.")
+                        break
 
             # Game over — show final scoreboard
             await self.show_final_scoreboard(ctx, scoreboard)
 
         finally:
-            self.active_channels.discard(ctx.channel.id)
+            if self.active_games.get(ctx.channel.id) is game:
+                del self.active_games[ctx.channel.id]
+
+    @commands.command(name="tgstop", aliases=["tgparar"])
+    async def timeguessr_stop(self, ctx):
+        """Encerra o jogo de TimeGuessr deste canal (quem começou ou moderadores)."""
+        game = self.active_games.get(ctx.channel.id)
+        if game is None:
+            await ctx.send("Nenhum jogo de TimeGuessr rolando nesse canal.")
+            return
+
+        is_starter = ctx.author.id == game['starter_id']
+        is_moderator = ctx.channel.permissions_for(ctx.author).manage_messages
+        if not (is_starter or is_moderator):
+            await ctx.send("⚠️ Só quem começou o jogo (ou um moderador) pode encerrá-lo.")
+            return
+
+        # The game's `finally` frees the channel once the task unwinds.
+        game['task'].cancel()
+        await ctx.send("⏹️ Jogo de TimeGuessr encerrado.")
 
     async def play_round(self, ctx, round_num, total_rounds, round_data, tempo=30):
         """Display the image and collect guesses for `tempo` seconds."""
