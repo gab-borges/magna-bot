@@ -1,9 +1,10 @@
-name: Publish container image
+name: Test and publish container image
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -13,7 +14,30 @@ env:
   IMAGE_NAME: docker.io/gabborges/magna-bot
 
 jobs:
+  test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Keep in sync with the Dockerfile base image.
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest -v
+
   publish:
+    needs: test
+    # Pull requests only run the tests; images are published from main and tags.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04-arm
 
     steps:
