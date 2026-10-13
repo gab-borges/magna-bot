@@ -176,6 +176,26 @@ class PlaybackSchedulingTests(unittest.IsolatedAsyncioTestCase):
         music.play_song.assert_not_awaited()
         self.assertEqual(music.queue['123'], [OTHER_ENTRY])
 
+    async def test_leave_does_not_start_the_next_track_while_disconnecting(self):
+        channel = object()
+        vc = make_voice_client(playing=True, channel=channel)
+        music = make_music()
+        music.voice_clients['123'] = vc
+        music.queue['123'] = [OTHER_ENTRY]
+        music.play_song = AsyncMock()
+        ctx = make_ctx(author=make_member(channel=channel), voice_client=vc)
+
+        async def disconnect(guild_id, guild=None):
+            # Disconnecting ends the track, which fires the `after` callback.
+            vc.is_playing.return_value = False
+            await music.play_next(ctx)
+
+        music.disconnect_voice_client = AsyncMock(side_effect=disconnect)
+
+        await Music.leave.callback(music, ctx)
+
+        music.play_song.assert_not_awaited()
+
     async def test_track_end_callback_does_not_wait_for_the_next_track(self):
         release = asyncio.Event()
         started = asyncio.Event()

@@ -1307,11 +1307,11 @@ class Music(commands.Cog):
         if vc:
             if not self.can_control_player(ctx, vc):
                 return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
-            await self.disconnect_voice_client(guild_id, ctx.guild)
+            # Clear first: disconnecting ends the track and fires play_next.
             self.queue[guild_id] = []
             self.loop_enabled[guild_id] = False
             self.current_urls.pop(guild_id, None)
-            self.skip_requested.discard(guild_id)
+            await self.disconnect_voice_client(guild_id, ctx.guild)
             await ctx.send("👋 Left the voice channel")
 
     @commands.command()
