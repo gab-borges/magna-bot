@@ -578,7 +578,14 @@ class Music(commands.Cog):
                 await ctx.send("❌ Unable to play this track.")
                 return
             
-            self.current_songs[str(ctx.guild.id)] = stream_data['title']
+            # The queue's "Now Playing" line repeats the same details.
+            self.current_songs[str(ctx.guild.id)] = " • ".join(
+                part for part in (
+                    stream_data['title'],
+                    stream_data.get('artist'),
+                    format_duration(stream_data.get('duration')),
+                ) if part
+            )
             self.current_urls[str(ctx.guild.id)] = url
             
             vc = self.voice_clients[str(ctx.guild.id)]
