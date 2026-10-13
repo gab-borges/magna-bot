@@ -26,6 +26,10 @@ A Discord bot built with Python and discord.py that combines fun interactions wi
 - `%queue`: Show the current queue
 - `%leave`: Leave the voice channel
 
+Only YouTube video links, Spotify track links and search terms are accepted.
+Playback controls (and `%play` while music is playing) only work from the bot's
+voice channel, unless the member has the *Move Members* permission.
+
 ## Setup 🚀
 
 1. Install dependencies:
@@ -54,11 +58,24 @@ sudo pacman -S ffmpeg
 python main.py
 ```
 
+5. Run the tests:
+```bash
+python -m unittest
+```
+
+Live checks against the real Spotify and YouTube services are skipped by
+default (and in CI). To run them, optionally with a `spotify.link` URL shared
+from the Spotify app:
+```bash
+MAGNA_LIVE_TESTS=1 SPOTIFY_SHORT_LINK=https://spotify.link/... python -m unittest tests.test_spotify_live -v
+```
+
 ## Imagem no Docker Hub
 
-Cada push na branch `main` publica automaticamente uma imagem ARM64 em
-`docker.io/gabborges/magna-bot:latest` por meio de um runner ARM64 nativo do
-GitHub Actions. O servidor não precisa receber o código-fonte nem fazer o build.
+Cada push na branch `main` roda os testes e, se eles passarem, publica
+automaticamente uma imagem ARM64 em `docker.io/gabborges/magna-bot:latest` por
+meio de um runner ARM64 nativo do GitHub Actions. Pull requests rodam apenas os
+testes. O servidor não precisa receber o código-fonte nem fazer o build.
 
 A imagem inclui FFmpeg para reprodução de áudio. O recurso de renderização
 LaTeX foi removido para evitar centenas de megabytes de dependências adicionais.
