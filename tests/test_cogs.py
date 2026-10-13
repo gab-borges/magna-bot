@@ -171,6 +171,17 @@ class MemeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(embed)
 
+    async def test_without_credentials_the_command_explains_it(self):
+        env = {'REDDIT_CLIENT_ID': '', 'REDDIT_CLIENT_SECRET': '', 'REDDIT_USER_AGENT': ''}
+        with patch.dict(os.environ, env), self.assertLogs('cogs.reddit', 'WARNING'):
+            cog = Reddit(bot=None)
+        ctx = self.make_ctx()
+
+        await Reddit.meme.callback(cog, ctx)
+
+        self.assertIn("Reddit API credentials", sent_text(ctx))
+        await cog.cog_unload()
+
 
 class DiceTests(unittest.TestCase):
     def test_parses_dice_and_modifiers(self):
