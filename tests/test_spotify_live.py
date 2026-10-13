@@ -13,6 +13,7 @@ import unittest
 from types import SimpleNamespace
 
 from cogs.music import Music
+from magna import youtube
 
 LIVE = os.getenv('MAGNA_LIVE_TESTS') == '1'
 
@@ -75,7 +76,7 @@ class SpotifyLiveTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertTrue(results, f"no YouTube results for {query!r}")
                 first = results[0]
-                self.assertIsNotNone(Music.normalize_youtube_url(first['webpage_url']))
+                self.assertIsNotNone(youtube.normalize_url(first['webpage_url']))
                 self.assertIn(name.casefold(), first['title'].casefold())
 
 

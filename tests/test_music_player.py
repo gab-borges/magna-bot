@@ -223,7 +223,7 @@ class PlaybackSchedulingTests(unittest.IsolatedAsyncioTestCase):
         music.bot.loop = asyncio.get_running_loop()
         music.play_next = AsyncMock()
 
-        with self.assertLogs('music_cog', level='ERROR') as logs:
+        with self.assertLogs('cogs.music', level='ERROR') as logs:
             music.after_playback(make_ctx(), RuntimeError("ffmpeg died"))
             await asyncio.sleep(0)
 

@@ -1,25 +1,19 @@
-import discord
-from discord.ext import commands
-import yt_dlp
 import asyncio
-import html
-import re
-import traceback
-import requests
-from bs4 import BeautifulSoup
-import json
-import urllib.parse
-import random
-import os
-import io
-import aiohttp
-import time
-from pathlib import Path
-import subprocess
-import platform
-import sys
-from dotenv import load_dotenv
 import logging
+import os
+import re
+import time
+import traceback
+import urllib.parse
+from pathlib import Path
+
+import discord
+import yt_dlp
+from discord.ext import commands
+
+from magna import spotify, youtube
+
+logger = logging.getLogger(__name__)
 
 
 class VoiceGatewayDiagnosticHandler(logging.Handler):
@@ -37,42 +31,12 @@ class VoiceGatewayDiagnosticHandler(logging.Handler):
         if match:
             self.cog.note_voice_close_code(int(match.group(1)))
 
-# Create private directory for sensitive files
-private_dir = Path('.private')
-private_dir.mkdir(exist_ok=True)
-
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(private_dir / 'bot.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger('music_cog')
-
-# Load environment variables
-load_dotenv()
 
 MIN_DISCORD_DAVE_VERSION = (2, 7, 0)
 
-YOUTUBE_HOSTS = {
-    'youtube.com',
-    'www.youtube.com',
-    'm.youtube.com',
-    'music.youtube.com',
-    'youtube-nocookie.com',
-    'www.youtube-nocookie.com',
-}
-YOUTUBE_VIDEO_ID_PATTERN = re.compile(r'[A-Za-z0-9_-]{11}')
 URL_SCHEME_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
 UNSUPPORTED_URL_MESSAGE = "❌ Only YouTube video and Spotify track links are supported."
-SPOTIFY_HOSTS = {'spotify.com', 'spotify.link'}
-SPOTIFY_MAX_REDIRECTS = 5
-SPOTIFY_TRACK_URL_PREFIX = "https://open.spotify.com/track/"
 NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
-HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 # Stream URLs carry their own expiry; stop reusing them a bit before it.
 STREAM_EXPIRY_MARGIN = 300
 # Downloaded fallback tracks kept on disk; older ones are deleted.
@@ -156,27 +120,6 @@ class Music(commands.Cog):
             'options': '-vn -bufsize 1024k -af aresample=async=1:first_pts=0',
         }
         
-        # Initialize instance lists
-        self.piped_instances = [
-            "https://pipedapi.kavin.rocks",
-            "https://pipedapi.tokhmi.xyz",
-            "https://piped-api.lunar.icu",
-            "https://pipedapi.syncpundit.io",
-            "https://api-piped.mha.fi",
-            "https://pipedapi.osphost.fi",
-            "https://pipedapi.in.projectsegfau.lt"
-        ]
-        
-        self.invidious_instances = [
-            "https://invidious.protokolla.fi",
-            "https://invidious.esmailelbob.xyz",
-            "https://yt.artemislena.eu",
-            "https://invidious.nerdvpn.de",
-            "https://invidious.dhusch.de",
-            "https://vid.puffyan.us",
-            "https://invidious.private.coffee"
-        ]
-
         self.voice_diagnostic_handler = VoiceGatewayDiagnosticHandler(self)
         logging.getLogger('discord.voice_state').addHandler(self.voice_diagnostic_handler)
 
@@ -270,10 +213,6 @@ class Music(commands.Cog):
         self.voice_clients[guild_id] = vc
         return vc
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"{__name__} is online!")
-
     @staticmethod
     def is_player_busy(vc):
         """A paused track still owns the player, so treat it like a playing one."""
@@ -351,54 +290,10 @@ class Music(commands.Cog):
                 if await self.play_song(ctx, entry['url']):
                     return
 
-    @staticmethod
-    def youtube_video_id(value):
-        """Return the video ID of a YouTube video URL, or None for anything else."""
-        parsed = urllib.parse.urlparse(value.strip())
-        if parsed.scheme not in ('http', 'https'):
-            return None
-
-        hostname = (parsed.hostname or '').lower()
-        parts = [part for part in parsed.path.split('/') if part]
-        if hostname == 'youtu.be':
-            video_id = parts[0] if parts else None
-        elif hostname in YOUTUBE_HOSTS:
-            if parts == ['watch']:
-                video_id = urllib.parse.parse_qs(parsed.query).get('v', [None])[0]
-            elif len(parts) >= 2 and parts[0] in ('embed', 'shorts', 'live', 'v'):
-                video_id = parts[1]
-            else:
-                video_id = None
-        else:
-            return None
-
-        if not video_id or not YOUTUBE_VIDEO_ID_PATTERN.fullmatch(video_id):
-            return None
-        return video_id
-
-    @classmethod
-    def normalize_youtube_url(cls, value):
-        """Return the canonical watch URL for a YouTube video link, or None."""
-        video_id = cls.youtube_video_id(value)
-        return f"https://www.youtube.com/watch?v={video_id}" if video_id else None
-
-    @staticmethod
-    def stream_url_expiry(stream_url):
-        """Return the Unix time a stream URL stops working, when it says so.
-
-        YouTube's media URLs carry an `expire` parameter; requesting them after
-        that time fails with 403 Forbidden.
-        """
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(stream_url).query)
-        try:
-            return int(query['expire'][0])
-        except (KeyError, IndexError, ValueError):
-            return None
-
     def is_cache_entry_fresh(self, cache_data, now):
         if now - cache_data['timestamp'] >= self.cache_timeout:
             return False
-        expiry = self.stream_url_expiry(cache_data['url'])
+        expiry = youtube.stream_url_expiry(cache_data['url'])
         return expiry is None or now < expiry - STREAM_EXPIRY_MARGIN
 
     async def get_cached_stream(self, video_id):
@@ -505,254 +400,54 @@ class Music(commands.Cog):
             'title': self.downloaded_titles.get(video_id) or "Downloaded Song",
         }, is_local=True)
 
-    async def get_direct_stream(self, video_id):
-        """Get stream URL directly from YouTube frontend"""
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Connection': 'keep-alive',
-                'DNT': '1',
-                'Referer': 'https://www.youtube.com/'
-            }
-            
-            # Try to get stream URL from YouTube directly
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-                async with session.get(url, headers=headers) as response:
-                    if response.status == 200:
-                        html = await response.text()
-                        
-                        # Extract player response
-                        player_response = re.search(r'ytInitialPlayerResponse\s*=\s*({.+?});', html)
-                        if player_response:
-                            data = json.loads(player_response.group(1))
-                            
-                            # Try to find audio stream URL
-                            formats = data.get('streamingData', {}).get('adaptiveFormats', [])
-                            for fmt in formats:
-                                stream_url = fmt.get('url')
-                                if fmt.get('mimeType', '').startswith('audio/') and self.is_valid_stream_url(stream_url):
-                                    return self.normalize_stream_data({
-                                        'url': fmt.get('url', ''),
-                                        'title': data.get('videoDetails', {}).get('title', 'Unknown Title')
-                                    })
-            
-            return None
-        except Exception as e:
-            print(f"Direct stream error: {str(e)}")
-            return None
-
-    async def get_piped_stream(self, video_id):
-        """Get stream URL from Piped API"""
-        # Try each Piped instance
-        random.shuffle(self.piped_instances)  # Randomize to distribute load
-        
-        for instance in self.piped_instances:
-            try:
-                api_url = f"{instance}/streams/{video_id}"
-                response = await asyncio.to_thread(requests.get, api_url, timeout=10)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    title = data.get('title', 'Unknown Title')
-                    
-                    # First try to get audio streams
-                    if 'audioStreams' in data and data['audioStreams']:
-                        for stream in data['audioStreams']:
-                            stream_data = self.normalize_stream_data({
-                                'url': stream.get('url'),
-                                'title': title
-                            })
-                            if stream_data:
-                                return stream_data
-                    
-                    # If no audio streams, try video streams
-                    if 'videoStreams' in data and data['videoStreams']:
-                        stream_data = self.normalize_stream_data({
-                            'url': data['videoStreams'][0].get('url'),
-                            'title': title
-                        })
-                        if stream_data:
-                            return stream_data
-            except Exception as e:
-                print(f"Error with Piped instance {instance}: {str(e)}")
-                continue
-                
-        return None
-
-    async def get_invidious_stream(self, video_id):
-        """Get stream URL from Invidious API"""
-        random.shuffle(self.invidious_instances)  # Randomize to distribute load
-        
-        for instance in self.invidious_instances:
-            try:
-                api_url = f"{instance}/api/v1/videos/{video_id}"
-                response = await asyncio.to_thread(requests.get, api_url, timeout=10)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    title = data.get('title', 'Unknown Title')
-                    
-                    # Get audio formats
-                    formats = data.get('adaptiveFormats', [])
-                    for fmt in formats:
-                        if fmt.get('type', '').startswith('audio/'):
-                            stream_data = self.normalize_stream_data({
-                                'url': fmt.get('url'),
-                                'title': title
-                            })
-                            if stream_data:
-                                return stream_data
-                    
-                    # Fallback to any format with a URL
-                    if formats and 'url' in formats[0]:
-                        stream_data = self.normalize_stream_data({
-                            'url': formats[0]['url'],
-                            'title': title
-                        })
-                        if stream_data:
-                            return stream_data
-            except Exception as e:
-                print(f"Error with Invidious instance {instance}: {str(e)}")
-                continue
-                
-        return None
-
-    async def get_ytmusic_stream(self, video_id):
-        """Get stream URL from YouTube Music API (last resort)"""
-        try:
-            api_url = f"https://music.youtube.com/watch?v={video_id}"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': 'https://music.youtube.com/'
-            }
-            
-            # Try to get direct stream URL from public sources
-            stream_sources = [
-                f"https://pipedapi.kavin.rocks/streams/{video_id}",
-                f"https://pipedapi-libre.kavin.rocks/streams/{video_id}",
-                f"https://vid.puffyan.us/latest_version?id={video_id}&itag=140",
-                f"https://yt.artemislena.eu/latest_version?id={video_id}&itag=140"
-            ]
-            
-            for src in stream_sources:
-                try:
-                    response = await asyncio.to_thread(requests.get, src, headers=headers, timeout=10)
-                    if response.status_code == 200:
-                        content_type = response.headers.get('Content-Type', '')
-                        if 'application/json' in content_type:
-                            data = response.json()
-                        else:
-                            data = response.text.strip()
-
-                        if isinstance(data, dict):
-                            # Handle Piped API format
-                            if 'audioStreams' in data and data['audioStreams']:
-                                stream_data = self.normalize_stream_data({
-                                    'url': data['audioStreams'][0].get('url'),
-                                    'title': data.get('title', 'YouTube Music Track')
-                                })
-                                if stream_data:
-                                    return stream_data
-                        elif isinstance(data, str) and data.startswith('http'):
-                            # Handle direct URL response
-                            stream_data = self.normalize_stream_data({
-                                'url': data,
-                                'title': 'YouTube Music Track'
-                            })
-                            if stream_data:
-                                return stream_data
-                except Exception as e:
-                    print(f"Error with YT Music source {src}: {str(e)}")
-                    continue
-                
-            return None
-        except Exception as e:
-            print(f"Error with YT Music API: {str(e)}")
-            return None
-
-    async def direct_search(self, query):
-        """Search directly from YouTube's frontend and get results"""
-        try:
-            search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9'
-            }
-            
-            async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session, \
-                    session.get(search_url, headers=headers) as response:
-                if response.status == 200:
-                    html = await response.text()
-                    
-                    # Extract video IDs from the page
-                    video_ids = re.findall(r'watch\?v=([a-zA-Z0-9_-]{11})', html)
-                    unique_ids = []
-                    for vid_id in video_ids:
-                        if vid_id not in unique_ids:
-                            unique_ids.append(vid_id)
-                    
-                    # Limit to 10 results
-                    limited_ids = unique_ids[:10]
-                    
-                    # Format results
-                    formatted_results = []
-                    for vid_id in limited_ids:
-                        # Extract title from page if possible
-                        title_match = re.search(r'title="([^"]+)".*?watch\?v=' + vid_id, html)
-                        title = title_match.group(1) if title_match else f"YouTube Video ({vid_id})"
-                        
-                        formatted_results.append({
-                            'id': vid_id,
-                            'title': title,
-                            'duration_string': 'Unknown',
-                            'webpage_url': f"https://www.youtube.com/watch?v={vid_id}"
-                        })
-                    
-                    return formatted_results
-            
-            return []
-        except Exception as e:
-            print(f"Direct search error: {str(e)}")
-            return []
-
     async def update_cookies(self):
         """Update cookies from environment variable"""
         try:
-            print("Attempting to update YouTube cookies...")
             new_cookies = os.getenv('YOUTUBE_COOKIES', '')
-            
-            if new_cookies:
-                # Never overwrite the operator's cookies file; write our own,
-                # readable only by the bot.
-                self.generated_cookies_file.touch(mode=0o600, exist_ok=True)
-                self.generated_cookies_file.write_text(new_cookies)
-
-                # Update the ydl_opts with new cookie file
-                self.ydl_opts['cookiefile'] = str(self.generated_cookies_file)
-                self.ydl_opts['cookiesfrombrowser'] = None
-                
-                print("Successfully updated cookies from environment variable")
-                return True
-            else:
-                print("No cookies found in environment variable")
+            if not new_cookies:
+                logger.warning("YouTube asked for sign-in, but YOUTUBE_COOKIES is empty")
                 return False
-                
-        except Exception as e:
-            print(f"Error updating cookies: {e}")
+
+            # Never overwrite the operator's cookies file; write our own,
+            # readable only by the bot.
+            self.generated_cookies_file.touch(mode=0o600, exist_ok=True)
+            self.generated_cookies_file.write_text(new_cookies)
+
+            # Update the ydl_opts with new cookie file
+            self.ydl_opts['cookiefile'] = str(self.generated_cookies_file)
+            self.ydl_opts['cookiesfrombrowser'] = None
+
+            logger.info("Loaded YouTube cookies from YOUTUBE_COOKIES")
+            return True
+
+        except Exception:
+            logger.exception("Error updating YouTube cookies")
             return False
 
+    @staticmethod
+    def is_bot_check(error):
+        return "Sign in to confirm you're not a bot" in str(error)
+
+    async def extract_with_cookie_retry(self, opts_factory, url):
+        """Run yt-dlp, retrying once with cookies when YouTube asks for sign-in.
+
+        `opts_factory` builds the options, so the retry sees updated cookies.
+        """
+        try:
+            return await self.extract_info(opts_factory(), url)
+        except Exception as e:
+            if not self.is_bot_check(e) or not await self.update_cookies():
+                raise
+            logger.info("Retrying %s with cookies after YouTube's bot check", url)
+            return await self.extract_info(opts_factory(), url)
+
     async def play_song(self, ctx, url):
-        """Play a song using multiple fallback methods.
+        """Play a YouTube video, falling back to downloading it.
 
         Returns True once playback has started.
         """
         try:
-            video_id = self.youtube_video_id(url)
+            video_id = youtube.video_id(url)
             if not video_id:
                 logger.warning(f"Refusing unsupported URL: {url}")
                 await ctx.send(UNSUPPORTED_URL_MESSAGE)
@@ -772,11 +467,9 @@ class Music(commands.Cog):
 
                 await ctx.send("🔍 Getting stream...")
 
-                # Try each method in sequence
                 stream_data = None
-
                 try:
-                    info = await self.extract_info(self.ydl_opts, normalized_url)
+                    info = await self.extract_with_cookie_retry(lambda: self.ydl_opts, normalized_url)
                     if info and info.get('url'):
                         stream_data = self.normalize_stream_data({
                             'url': info['url'],
@@ -784,43 +477,14 @@ class Music(commands.Cog):
                         })
                 except Exception as e:
                     logger.error(f"yt-dlp error: {str(e)}")
-                    if "Sign in to confirm you're not a bot" in str(e):
-                        await ctx.send("⚠️ Refreshing connection...")
-                        if await self.update_cookies():
-                            try:
-                                info = await self.extract_info(self.ydl_opts, normalized_url)
-                                if info and info.get('url'):
-                                    stream_data = self.normalize_stream_data({
-                                        'url': info['url'],
-                                        'title': info.get('title', 'Unknown Title')
-                                    })
-                            except Exception as retry_error:
-                                logger.error(f"Retry failed: {str(retry_error)}")
 
-                # Try alternative methods if main method fails
+                # Downloading the track is slower, so it's the last resort.
                 if not stream_data:
-                    for method in range(1, 6):  # Try up to 5 alternative methods
-                        try:
-                            if method == 1:
-                                stream_data = await self.get_piped_stream(video_id)
-                            elif method == 2:
-                                stream_data = await self.get_invidious_stream(video_id)
-                            elif method == 3:
-                                stream_data = await self.get_direct_stream(video_id)
-                            elif method == 4:
-                                stream_data = await self.get_ytmusic_stream(video_id)
-                            elif method == 5:
-                                # Try downloading as last resort
-                                stream_data = await self.get_downloaded_stream(video_id, normalized_url)
-
-                            if stream_data:
-                                break
-
-                            await ctx.send("⏳ Trying alternative source...")
-
-                        except Exception as e:
-                            logger.error(f"Alternative method {method} failed: {str(e)}")
-                            continue
+                    await ctx.send("⏳ Trying alternative source...")
+                    try:
+                        stream_data = await self.get_downloaded_stream(video_id, normalized_url)
+                    except Exception as e:
+                        logger.error(f"Download fallback failed: {str(e)}")
 
                 stream_data = self.normalize_stream_data(stream_data)
 
@@ -875,11 +539,9 @@ class Music(commands.Cog):
         return False
 
     async def search_youtube(self, query):
-        """Search YouTube with multiple fallback methods"""
-        # First try with yt-dlp
-        try:
-            # Use a custom format with yt-dlp to perform the search
-            search_opts = {
+        """Search YouTube for up to 10 videos."""
+        def search_opts():
+            return {
                 'format': 'bestaudio/best',
                 'quiet': True,
                 'no_warnings': True,
@@ -889,275 +551,28 @@ class Music(commands.Cog):
                 'cookiesfrombrowser': self.ydl_opts.get('cookiesfrombrowser'),
                 'http_headers': self.ydl_opts.get('http_headers')
             }
-            
-            info = await self.extract_info(search_opts, f"ytsearch10:{query}")
-            if 'entries' in info and info['entries']:
-                # Format results
-                formatted_results = []
-                for entry in info['entries']:
-                    formatted_results.append({
-                        'id': entry.get('id'),
-                        'title': entry.get('title', 'Unknown Title'),
-                        'duration_string': entry.get('duration_string', 'Unknown'),
-                        'webpage_url': entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id')}"
-                    })
-                return formatted_results
-                    
+
+        try:
+            info = await self.extract_with_cookie_retry(search_opts, f"ytsearch10:{query}")
         except Exception as e:
-            print(f"yt-dlp search error: {str(e)}")
-            # If error is about bot detection, try to update cookies
-            if "Sign in to confirm you're not a bot" in str(e):
-                print("Trying to update cookies due to bot detection...")
-                await self.update_cookies()
-        
-        # Try Invidious API next
-        try:
-            # Randomly choose an Invidious instance
-            instance = random.choice(self.invidious_instances)
-            
-            # Search using Invidious API
-            encoded_query = urllib.parse.quote(query)
-            api_url = f"{instance}/api/v1/search?q={encoded_query}&type=video"
-            
-            response = await asyncio.to_thread(requests.get, api_url, timeout=10)
-            if response.status_code == 200:
-                results = response.json()
-                
-                # Format results similar to previous format
-                formatted_results = []
-                for video in results[:10]:  # Limit to 10 results
-                    formatted_results.append({
-                        'id': video.get('videoId'),
-                        'title': video.get('title', 'Unknown Title'),
-                        'duration_string': self._format_duration(video.get('lengthSeconds', 0)),
-                        'channel': video.get('author'),
-                        'webpage_url': f"https://www.youtube.com/watch?v={video.get('videoId')}"
-                    })
-                return formatted_results
-                
-        except Exception as e:
-            print(f"Invidious API search error: {str(e)}")
-        
-        # Try Piped API if Invidious fails
-        try:
-            # Randomly choose a Piped instance
-            instance = random.choice(self.piped_instances)
-            
-            # Search using Piped API
-            encoded_query = urllib.parse.quote(query)
-            api_url = f"{instance}/search?q={encoded_query}&filter=videos"
-            
-            response = await asyncio.to_thread(requests.get, api_url, timeout=10)
-            if response.status_code == 200:
-                results = response.json()
-                
-                # Format results
-                formatted_results = []
-                for item in results[:10]:
-                    formatted_results.append({
-                        'id': item.get('id'),
-                        'title': item.get('title', 'Unknown Title'),
-                        'duration_string': item.get('duration', 'Unknown'),
-                        'webpage_url': f"https://www.youtube.com/watch?v={item.get('id')}"
-                    })
-                return formatted_results
-        except Exception as e:
-            print(f"Piped API search error: {str(e)}")
-        
-        # If all else fails, try direct search
-        try:
-            results = await self.direct_search(query)
-            if results:
-                return results
-        except Exception as e:
-            print(f"Direct search error: {str(e)}")
-        
-        # If all searches fail, return empty results
-        return []
+            logger.error(f"yt-dlp search error: {str(e)}")
+            return []
 
-    def _format_duration(self, seconds):
-        """Format duration from seconds to MM:SS"""
-        minutes, seconds = divmod(int(seconds), 60)
-        hours, minutes = divmod(minutes, 60)
-        if hours > 0:
-            return f"{hours}:{minutes:02d}:{seconds:02d}"
-        else:
-            return f"{minutes}:{seconds:02d}"
-
-    @staticmethod
-    def is_spotify_reference(value):
-        """Return whether a value is a Spotify URL or URI."""
-        value = value.strip()
-        if value.lower().startswith('spotify:'):
-            return True
-
-        parsed = urllib.parse.urlparse(value)
-        hostname = (parsed.hostname or '').lower()
-        return (
-            hostname == 'spotify.com'
-            or hostname.endswith('.spotify.com')
-            or hostname == 'spotify.link'
-            or hostname.endswith('.spotify.link')
-        )
-
-    @staticmethod
-    def is_fetchable_spotify_url(url):
-        """Return whether the bot may request this URL while resolving a track."""
-        parsed = urllib.parse.urlparse(url)
-        hostname = (parsed.hostname or '').lower()
-        try:
-            port = parsed.port
-        except ValueError:
-            return False
-        is_spotify_host = (
-            hostname in SPOTIFY_HOSTS
-            or hostname.endswith(('.spotify.com', '.spotify.link'))
-        )
-        return (
-            parsed.scheme == 'https'
-            and port in (None, 443)
-            and not parsed.username
-            and is_spotify_host
-        )
-
-    async def fetch_spotify_page(self, session, url):
-        """GET a Spotify page, following redirects only within Spotify over HTTPS.
-
-        Returns (final_url, html), or None when the page can't be fetched.
-        """
-        for _ in range(SPOTIFY_MAX_REDIRECTS + 1):
-            if not self.is_fetchable_spotify_url(url):
-                logger.warning("Refusing to follow Spotify redirect to %s", url)
-                return None
-
-            async with session.get(url, allow_redirects=False) as response:
-                location = response.headers.get('Location')
-                if response.status in (301, 302, 303, 307, 308) and location:
-                    url = urllib.parse.urljoin(url, location)
-                    continue
-                if response.status != 200:
-                    return None
-                return url, await response.text()
-
-        logger.warning("Too many redirects while resolving Spotify link")
-        return None
-
-    @staticmethod
-    def normalize_spotify_track_url(value):
-        """Normalize supported Spotify track references to a web URL."""
-        value = value.strip()
-        uri_match = re.fullmatch(r'spotify:track:([A-Za-z0-9]{22})', value, re.IGNORECASE)
-        if uri_match:
-            return f"https://open.spotify.com/track/{uri_match.group(1)}"
-
-        parsed = urllib.parse.urlparse(value)
-        hostname = (parsed.hostname or '').lower()
-        if hostname == 'spotify.link' or hostname.endswith('.spotify.link'):
-            # Short links are resolved by following their redirects, so only
-            # accept ones that can be fetched safely.
-            return value if Music.is_fetchable_spotify_url(value) else None
-
-        if not (
-            hostname == 'spotify.com'
-            or hostname.endswith('.spotify.com')
-        ):
-            return None
-
-        parts = [part for part in parsed.path.split('/') if part]
-        try:
-            track_index = parts.index('track')
-            track_id = parts[track_index + 1]
-        except (ValueError, IndexError):
-            return None
-
-        if not re.fullmatch(r'[A-Za-z0-9]{22}', track_id):
-            return None
-
-        return f"https://open.spotify.com/track/{track_id}"
-
-    @staticmethod
-    def spotify_query_from_embed(page_html, track_id):
-        """Build a "track artists" query from the track's embed page.
-
-        The embed page carries the track's metadata as Next.js data, including
-        every artist, which oEmbed and the regular page title don't reliably do.
-        """
-        script = BeautifulSoup(page_html, 'html.parser').find('script', id='__NEXT_DATA__')
-        if script is None or not script.string:
-            return None
-
-        try:
-            entity = json.loads(script.string)['props']['pageProps']['state']['data']['entity']
-        except (ValueError, KeyError, TypeError):
-            return None
-
-        if not isinstance(entity, dict):
-            return None
-        if entity.get('type') != 'track' or entity.get('uri') != f"spotify:track:{track_id}":
-            return None
-
-        name = (entity.get('name') or '').strip()
-        artists = [
-            artist.get('name', '').strip()
-            for artist in entity.get('artists') or []
-            if isinstance(artist, dict)
+        return [
+            {
+                'id': entry.get('id'),
+                'title': entry.get('title', 'Unknown Title'),
+                'duration_string': entry.get('duration_string', 'Unknown'),
+                'webpage_url': entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id')}"
+            }
+            for entry in (info or {}).get('entries') or []
         ]
-        artists = [artist for artist in artists if artist]
-        if not name or not artists:
-            return None
-        return " ".join([name, *artists])
 
     async def handle_spotify_url(self, url):
         """Resolve a Spotify track to a title/artist query for YouTube."""
-        track_url = self.normalize_spotify_track_url(url)
-        if not track_url:
-            return None
-
-        timeout = aiohttp.ClientTimeout(total=8, connect=5, sock_read=5)
-        headers = {
-            'User-Agent': self.ydl_opts['http_headers']['User-Agent'],
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-
-        try:
-            # Keep every metadata attempt under one deadline so a Spotify
-            # outage cannot hold the command open indefinitely.
-            async with asyncio.timeout(12):
-                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                    if not track_url.startswith(SPOTIFY_TRACK_URL_PREFIX):
-                        # A short link: follow it to find out which track it is.
-                        page = await self.fetch_spotify_page(session, track_url)
-                        resolved_url = page and self.normalize_spotify_track_url(page[0])
-                        if resolved_url:
-                            track_url = resolved_url
-
-                    if track_url.startswith(SPOTIFY_TRACK_URL_PREFIX):
-                        track_id = track_url.removeprefix(SPOTIFY_TRACK_URL_PREFIX)
-                        embed_url = f"https://open.spotify.com/embed/track/{track_id}"
-                        page = await self.fetch_spotify_page(session, embed_url)
-                        search_query = page and self.spotify_query_from_embed(page[1], track_id)
-                        if search_query:
-                            return search_query
-
-                    # oEmbed is an official, credential-free metadata endpoint.
-                    # It only has the track name, so it is the last resort.
-                    oembed_url = 'https://open.spotify.com/oembed'
-                    async with session.get(
-                        oembed_url, params={'url': track_url}, allow_redirects=False
-                    ) as response:
-                        if response.status != 200:
-                            return None
-
-                        metadata = await response.json(content_type=None)
-                        iframe_url = metadata.get('iframe_url', '')
-                        if '/track/' not in iframe_url:
-                            return None
-
-                        title = html.unescape(metadata.get('title', '')).strip()
-                        return title or None
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
-            logger.warning("Could not resolve Spotify track %s: %s", url, e)
-            return None
+        return await spotify.resolve_track(
+            url, user_agent=self.ydl_opts['http_headers']['User-Agent']
+        )
 
     @commands.command()
     async def play(self, ctx, *, query):
@@ -1203,7 +618,7 @@ class Music(commands.Cog):
             if guild_id not in self.queue:
                 self.queue[guild_id] = []
 
-            if self.is_spotify_reference(query):
+            if spotify.is_spotify_reference(query):
                 await ctx.send("🎵 Resolving Spotify track...")
                 spotify_info = await self.handle_spotify_url(query)
                 if not spotify_info:
@@ -1222,7 +637,7 @@ class Music(commands.Cog):
                 return
 
             if URL_SCHEME_PATTERN.match(query):
-                url = self.normalize_youtube_url(query)
+                url = youtube.normalize_url(query)
                 if not url:
                     return await ctx.send(UNSUPPORTED_URL_MESSAGE)
 
@@ -1294,56 +709,6 @@ class Music(commands.Cog):
         except Exception as e:
             logger.error(f"Play command error: {str(e)}\n{traceback.format_exc()}")
             await ctx.send("❌ An error occurred while processing your request.")
-
-    @commands.command()
-    async def testplay(self, ctx):
-        """Um comando simples para testar a conexão de voz com um arquivo local."""
-        # 1. Verifica se o autor está em um canal de voz
-        if not ctx.author.voice:
-            return await ctx.send("Você precisa estar em um canal de voz para este teste.")
-
-        guild_id = str(ctx.guild.id)
-
-        # 2. Tenta se conectar ao canal
-        try:
-            vc = await self.ensure_voice_client(ctx)
-        except discord.errors.ConnectionClosed:
-            await self.disconnect_voice_client(guild_id, ctx.guild)
-            await ctx.send(self.build_voice_connection_error())
-            return
-        except asyncio.TimeoutError:
-            await self.disconnect_voice_client(guild_id, ctx.guild)
-            await ctx.send(self.build_voice_connection_error())
-            return
-        except Exception as e:
-            await self.disconnect_voice_client(guild_id, ctx.guild)
-            await ctx.send(f"❌ Falha ao conectar: {e}")
-            return
-
-        # 3. Tenta carregar o áudio local
-        try:
-            # Garanta que o arquivo 'audio.mp3' está na pasta raiz do bot
-            source = discord.FFmpegOpusAudio('audio.mp3')
-        except Exception as e:
-            await ctx.send(f"❌ Falha ao carregar o arquivo 'audio.mp3': {e}")
-            await vc.disconnect()
-            return
-
-        # 4. Toca o áudio e desconecta
-        try:
-            await ctx.send("▶️ Tocando áudio de teste...")
-            vc.play(source)
-
-            while vc.is_playing():
-                await asyncio.sleep(1)
-
-            await vc.disconnect()
-            await ctx.send("✅ Teste finalizado.")
-
-        except Exception as e:
-            await ctx.send(f"❌ Erro durante a reprodução: {e}")
-            if vc.is_connected():
-                await vc.disconnect()
 
     @commands.command()
     async def stop(self, ctx):

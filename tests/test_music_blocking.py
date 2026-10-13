@@ -12,7 +12,7 @@ VIDEO_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
 
 
 class SlowCall:
-    """A blocking stand-in for requests/yt-dlp.
+    """A blocking stand-in for yt-dlp.
 
     It waits for the event loop to set `released`. When the call runs on the
     loop thread the loop can't do that, so the wait times out instead.
@@ -53,36 +53,16 @@ def fake_youtube_dl(slow_call):
 
 class EventLoopResponsivenessTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.music = make_music(
-            piped_instances=['https://piped.example'],
-            invidious_instances=['https://invidious.example'],
-        )
+        self.music = make_music()
 
     async def run_alongside(self, slow_call, coro):
         await asyncio.gather(coro, slow_call.release_soon())
         self.assertTrue(slow_call.freed_by_loop, "the slow call never ran")
         self.assertTrue(all(slow_call.freed_by_loop), "the event loop was blocked")
 
-    async def test_piped_requests_do_not_block_the_loop(self):
-        slow = SlowCall(RuntimeError("offline"))
-        with patch('cogs.music.requests.get', side_effect=slow):
-            await self.run_alongside(slow, self.music.get_piped_stream(VIDEO_ID))
-
-    async def test_invidious_requests_do_not_block_the_loop(self):
-        slow = SlowCall(RuntimeError("offline"))
-        with patch('cogs.music.requests.get', side_effect=slow):
-            await self.run_alongside(slow, self.music.get_invidious_stream(VIDEO_ID))
-
-    async def test_youtube_music_requests_do_not_block_the_loop(self):
-        slow = SlowCall(RuntimeError("offline"))
-        with patch('cogs.music.requests.get', side_effect=slow):
-            await self.run_alongside(slow, self.music.get_ytmusic_stream(VIDEO_ID))
-
     async def test_search_does_not_block_the_loop(self):
         slow = SlowCall(RuntimeError("offline"))
-        self.music.direct_search = AsyncMock(return_value=[])
-        with patch('cogs.music.yt_dlp.YoutubeDL', fake_youtube_dl(slow)), \
-                patch('cogs.music.requests.get', side_effect=slow):
+        with patch('cogs.music.yt_dlp.YoutubeDL', fake_youtube_dl(slow)):
             await self.run_alongside(slow, self.music.search_youtube("song"))
 
     async def test_stream_extraction_does_not_block_the_loop(self):
