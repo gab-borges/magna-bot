@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import asyncio
-import html
 import re
 import traceback
 import requests
@@ -20,6 +19,9 @@ import platform
 import sys
 from dotenv import load_dotenv
 import logging
+from ytmusicapi import YTMusic
+
+import music_matching
 
 
 class VoiceGatewayDiagnosticHandler(logging.Handler):
@@ -92,6 +94,7 @@ class Music(commands.Cog):
         self.queue = {}
         self.search_results = {}
         self.playback_locks = {}
+        self.ytmusic = None  # created on first use
         self.stream_cache = {}  # Cache for successful stream URLs
         self.cache_timeout = 3600  # Cache timeout in seconds (1 hour)
         self.last_voice_close_code = None
@@ -350,12 +353,11 @@ class Music(commands.Cog):
                     return
 
     async def find_queued_track(self, ctx, entry):
-        """Find the YouTube video for a track queued by name, e.g. from a playlist."""
-        results = await self.search_youtube(entry['query'])
-        if not results:
-            await ctx.send(f"❌ Couldn't find **{entry['title']}** on YouTube, skipping it.")
-            return None
-        return results[0]['webpage_url']
+        """Find the YouTube video for a queued Spotify track, e.g. from a playlist."""
+        url = await self.find_spotify_match(entry['spotify'])
+        if not url:
+            await ctx.send(self.no_match_message(entry['spotify']))
+        return url
 
     @staticmethod
     def youtube_video_id(value):
@@ -1090,29 +1092,38 @@ class Music(commands.Cog):
         return entity
 
     @staticmethod
-    def spotify_query_from_embed(page_html, track_id):
-        """Build a "track artists" query from the track's embed page."""
+    def spotify_duration_ms(value):
+        is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        return int(value) if is_number and value > 0 else None
+
+    @staticmethod
+    def spotify_track_from_embed(page_html, track_id):
+        """Read a track's name, artists and duration from its embed page."""
         entity = Music.spotify_embed_entity(page_html, 'track', track_id)
         if entity is None:
             return None
 
-        name = (entity.get('name') or '').strip()
+        name = " ".join(str(entity.get('name') or '').split())
         artists = [
-            artist.get('name', '').strip()
+            " ".join(artist['name'].split())
             for artist in entity.get('artists') or []
-            if isinstance(artist, dict)
+            if isinstance(artist, dict) and isinstance(artist.get('name'), str)
         ]
         artists = [artist for artist in artists if artist]
         if not name or not artists:
             return None
-        return " ".join([name, *artists])
+        return {
+            'name': name,
+            'artists': artists,
+            'duration_ms': Music.spotify_duration_ms(entity.get('duration')),
+        }
 
     @staticmethod
     def spotify_collection_from_embed(page_html, kind, entity_id):
         """Read an album's or playlist's name and tracks from its embed page.
 
-        Returns {'name', 'tracks'}, where each track is {'query', 'title'}, or
-        None when the page has no usable track list.
+        Returns {'name', 'tracks'}, with tracks shaped like
+        spotify_track_from_embed's, or None when the page has no usable tracks.
         """
         entity = Music.spotify_embed_entity(page_html, kind, entity_id)
         if entity is None or not isinstance(entity.get('trackList'), list):
@@ -1126,26 +1137,36 @@ class Music(commands.Cog):
             if not re.fullmatch(r'spotify:track:[A-Za-z0-9]{22}', item.get('uri') or ''):
                 continue
 
-            title = " ".join(str(item.get('title') or item.get('name') or '').split())
-            artists = " ".join(str(item.get('subtitle') or '').split())
-            if not artists and isinstance(item.get('artists'), list):
-                artists = ", ".join(
-                    artist['name'].strip()
+            name = " ".join(str(item.get('title') or item.get('name') or '').split())
+            if isinstance(item.get('artists'), list):
+                artists = [
+                    artist['name']
                     for artist in item['artists']
                     if isinstance(artist, dict) and isinstance(artist.get('name'), str)
-                )
-            if not title:
+                ]
+            else:
+                # The list shows artists as one "A, B" line.
+                artists = str(item.get('subtitle') or '').split(',')
+            artists = [" ".join(artist.split()) for artist in artists]
+            artists = [artist for artist in artists if artist]
+            # Without artists a YouTube result can't be checked, so skip it.
+            if not name or not artists:
                 continue
 
             tracks.append({
-                'query': f"{title} {artists}".strip(),
-                'title': f"{title} — {artists}" if artists else title,
+                'name': name,
+                'artists': artists,
+                'duration_ms': Music.spotify_duration_ms(item.get('duration')),
             })
 
         if not tracks:
             return None
         name = " ".join(str(entity.get('name') or entity.get('title') or '').split())
         return {'name': name or kind.capitalize(), 'tracks': tracks}
+
+    @staticmethod
+    def spotify_track_title(track):
+        return f"{track['name']} — {', '.join(track['artists'])}"
 
     def spotify_session(self):
         timeout = aiohttp.ClientTimeout(total=8, connect=5, sock_read=5)
@@ -1187,50 +1208,114 @@ class Music(commands.Cog):
         return page and self.spotify_collection_from_embed(page[1], kind, entity_id)
 
     async def handle_spotify_url(self, url):
-        """Resolve a Spotify track to a title/artist query for YouTube."""
+        """Resolve a Spotify track to its name, artists and duration."""
         track_url = self.normalize_spotify_track_url(url)
         if not track_url:
             return None
 
         try:
-            # Keep every metadata attempt under one deadline so a Spotify
-            # outage cannot hold the command open indefinitely.
+            # Keep every request under one deadline so a Spotify outage
+            # cannot hold the command open indefinitely.
             async with asyncio.timeout(12):
                 async with self.spotify_session() as session:
                     if not track_url.startswith(SPOTIFY_TRACK_URL_PREFIX):
                         # A short link: follow it to find out which track it is.
                         page = await self.fetch_spotify_page(session, track_url)
-                        resolved_url = page and self.normalize_spotify_track_url(page[0])
-                        if resolved_url:
-                            track_url = resolved_url
-
-                    if track_url.startswith(SPOTIFY_TRACK_URL_PREFIX):
-                        track_id = track_url.removeprefix(SPOTIFY_TRACK_URL_PREFIX)
-                        embed_url = f"https://open.spotify.com/embed/track/{track_id}"
-                        page = await self.fetch_spotify_page(session, embed_url)
-                        search_query = page and self.spotify_query_from_embed(page[1], track_id)
-                        if search_query:
-                            return search_query
-
-                    # oEmbed is an official, credential-free metadata endpoint.
-                    # It only has the track name, so it is the last resort.
-                    oembed_url = 'https://open.spotify.com/oembed'
-                    async with session.get(
-                        oembed_url, params={'url': track_url}, allow_redirects=False
-                    ) as response:
-                        if response.status != 200:
+                        track_url = page and self.normalize_spotify_track_url(page[0])
+                        if not track_url or not track_url.startswith(SPOTIFY_TRACK_URL_PREFIX):
                             return None
 
-                        metadata = await response.json(content_type=None)
-                        iframe_url = metadata.get('iframe_url', '')
-                        if '/track/' not in iframe_url:
-                            return None
-
-                        title = html.unescape(metadata.get('title', '')).strip()
-                        return title or None
+                    track_id = track_url.removeprefix(SPOTIFY_TRACK_URL_PREFIX)
+                    embed_url = f"https://open.spotify.com/embed/track/{track_id}"
+                    page = await self.fetch_spotify_page(session, embed_url)
+                    return page and self.spotify_track_from_embed(page[1], track_id)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
             logger.warning("Could not resolve Spotify track %s: %s", url, e)
             return None
+
+    async def ytmusic_candidates(self, query, kind):
+        """Search YouTube Music ("songs" or "videos") without signing in."""
+        if self.ytmusic is None:
+            self.ytmusic = await asyncio.to_thread(YTMusic)
+        results = await asyncio.to_thread(self.ytmusic.search, query, filter=kind, limit=10)
+        candidates = []
+        for result in results[:10]:
+            video_id = result.get('videoId') or ''
+            if not YOUTUBE_VIDEO_ID_PATTERN.fullmatch(video_id):
+                continue
+            artists = " ".join(
+                artist.get('name') or ''
+                for artist in result.get('artists') or []
+                if isinstance(artist, dict)
+            )
+            title = result.get('title') or ''
+            candidates.append({
+                'video_id': video_id,
+                'title': title,
+                # Songs credit their artists; videos may only name them in the title.
+                'artist_text': artists if kind == 'songs' else f"{artists} {title}",
+                'duration': result.get('duration_seconds'),
+            })
+        return candidates
+
+    async def youtube_candidates(self, query):
+        """Search regular YouTube with yt-dlp."""
+        opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'cookiefile': self.ydl_opts.get('cookiefile'),
+            'http_headers': self.ydl_opts.get('http_headers'),
+        }
+        info = await self.extract_info(opts, f"ytsearch10:{query}")
+        candidates = []
+        for entry in info.get('entries') or []:
+            video_id = entry.get('id') or ''
+            if not YOUTUBE_VIDEO_ID_PATTERN.fullmatch(video_id):
+                continue
+            title = entry.get('title') or ''
+            channel = entry.get('channel') or entry.get('uploader') or ''
+            candidates.append({
+                'video_id': video_id,
+                'title': title,
+                'artist_text': f"{channel} {title}",
+                'duration': entry.get('duration'),
+            })
+        return candidates
+
+    async def find_spotify_match(self, track):
+        """Return the YouTube URL of the same recording as a Spotify track, or None.
+
+        Official song uploads on YouTube Music are tried first, then its videos,
+        then regular YouTube. Results that don't match the track's title,
+        artists and duration are never played.
+        """
+        query = " ".join([track['name'], *track['artists']])
+        searches = (
+            ("YouTube Music songs", lambda: self.ytmusic_candidates(query, 'songs')),
+            ("YouTube Music videos", lambda: self.ytmusic_candidates(query, 'videos')),
+            ("YouTube", lambda: self.youtube_candidates(query)),
+        )
+        for label, search in searches:
+            try:
+                candidates = await search()
+            except Exception as e:
+                logger.warning("%s search failed for %r: %s", label, query, e)
+                continue
+
+            match = music_matching.pick_match(track, candidates)
+            if match:
+                logger.info("Matched %r to %s %s", query, label, match['video_id'])
+                return f"https://www.youtube.com/watch?v={match['video_id']}"
+
+        logger.info("No reliable YouTube match for %r", query)
+        return None
+
+    def no_match_message(self, track):
+        return (
+            f"⏭️ I couldn't find a reliable match for **{self.spotify_track_title(track)}** "
+            f"on YouTube, so I skipped it."
+        )
 
     async def play_spotify(self, ctx, vc, reference):
         """Play a Spotify track, or queue every track of an album or playlist."""
@@ -1246,23 +1331,23 @@ class Music(commands.Cog):
             return await self.enqueue_spotify_collection(ctx, vc, collection)
 
         await ctx.send("🎵 Resolving Spotify track...")
-        spotify_info = await self.handle_spotify_url(reference)
-        if not spotify_info:
+        track = await self.handle_spotify_url(reference)
+        if not track:
             return await ctx.send(
                 "❌ I couldn't read this Spotify track. "
                 "Only track, album and playlist links are supported."
             )
 
-        results = await self.search_youtube(spotify_info)
-        if not results:
-            return await ctx.send("❌ I couldn't find this Spotify track on YouTube.")
+        url = await self.find_spotify_match(track)
+        if not url:
+            return await ctx.send(self.no_match_message(track))
 
-        selected = results[0]
-        if await self.play_or_enqueue(ctx, vc, selected['webpage_url'], selected['title']):
-            await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
+        title = self.spotify_track_title(track)
+        if await self.play_or_enqueue(ctx, vc, url, title):
+            await ctx.send(f"🎵 Added to queue: **{title}**")
 
     async def enqueue_spotify_collection(self, ctx, vc, collection):
-        """Queue an album's or playlist's tracks by name and start playing if idle.
+        """Queue an album's or playlist's tracks and start playing if idle.
 
         Each track is looked up on YouTube only when its turn comes, so a long
         playlist doesn't fire a burst of searches.
@@ -1270,7 +1355,7 @@ class Music(commands.Cog):
         guild_id = str(ctx.guild.id)
         tracks = collection['tracks'][:SPOTIFY_COLLECTION_LIMIT]
         entries = [
-            {'url': None, 'query': track['query'], 'title': track['title']}
+            {'url': None, 'spotify': track, 'title': self.spotify_track_title(track)}
             for track in tracks
         ]
 

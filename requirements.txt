@@ -7,3 +7,4 @@ requests
 yt-dlp
 beautifulsoup4
 python-dotenv
+ytmusicapi

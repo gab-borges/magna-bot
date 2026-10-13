@@ -11,7 +11,6 @@ from tests.music_helpers import make_ctx, make_music, make_voice_client, sent_te
 TRACK_ID = "11dFghVXANMlKmJXsNCbNl"
 TRACK_URL = f"https://open.spotify.com/track/{TRACK_ID}"
 EMBED_URL = f"https://open.spotify.com/embed/track/{TRACK_ID}"
-OEMBED_URL = f"https://open.spotify.com/oembed?{urllib.parse.urlencode({'url': TRACK_URL})}"
 SHORT_URL = "https://spotify.link/abc123"
 ALBUM_ID = "1ATL5GLyefJaxhQzSPVrLX"
 PLAYLIST_ID = "37i9dQZF1DXcBWIGoYBM5M"
@@ -39,33 +38,42 @@ def playlist_entity(track_list, playlist_id=PLAYLIST_ID, name="Mix"):
     }
 
 
-def list_item(title, subtitle, track_id=TRACK_ID):
-    return {'uri': f"spotify:track:{track_id}", 'title': title, 'subtitle': subtitle}
+def list_item(title, subtitle, track_id=TRACK_ID, duration=None):
+    item = {'uri': f"spotify:track:{track_id}", 'title': title, 'subtitle': subtitle}
+    if duration is not None:
+        item['duration'] = duration
+    return item
 
 
-def track_entity(name="Track", artists=("Artist",), track_id=TRACK_ID):
-    return {
+def track_entity(name="Track", artists=("Artist",), track_id=TRACK_ID, duration=None):
+    entity = {
         'type': 'track',
         'id': track_id,
         'uri': f"spotify:track:{track_id}",
         'name': name,
         'artists': [{'name': artist} for artist in artists],
     }
+    if duration is not None:
+        entity['duration'] = duration
+    return entity
+
+
+def spotify_track(name="Track", artists=("Artist",), duration_ms=None):
+    return {'name': name, 'artists': list(artists), 'duration_ms': duration_ms}
+
+
+TRACK = spotify_track()
 
 
 class FakeResponse:
-    def __init__(self, url, status=200, location=None, text="", json=None):
+    def __init__(self, url, status=200, location=None, text=""):
         self.url = url
         self.status = status
         self.headers = {'Location': location} if location else {}
         self._text = text
-        self._json = json
 
     async def text(self):
         return self._text
-
-    async def json(self, content_type=None):
-        return self._json
 
 
 class FakeRequest:
@@ -92,9 +100,7 @@ class FakeSpotifySession:
     async def __aexit__(self, *exc):
         return False
 
-    def get(self, url, params=None, allow_redirects=True, **kwargs):
-        if params:
-            url = f"{url}?{urllib.parse.urlencode(params)}"
+    def get(self, url, allow_redirects=True, **kwargs):
         for _ in range(10):  # aiohttp's default max_redirects
             self.requested.append(url)
             response = self.responses.get(url) or FakeResponse(url, status=404)
@@ -175,14 +181,12 @@ class SpotifyReferenceTests(unittest.TestCase):
 
 
 class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
-    def make_music(self, *, playing=False, resolved="Track Artist", results=None):
+    def make_music(self, *, playing=False, resolved=TRACK, match=YOUTUBE_URL):
         music = make_music()
         self.vc = make_voice_client(playing=playing)
         music.ensure_voice_client = AsyncMock(return_value=self.vc)
         music.handle_spotify_url = AsyncMock(return_value=resolved)
-        music.search_youtube = AsyncMock(return_value=[
-            {'title': 'Track — Artist', 'webpage_url': YOUTUBE_URL},
-        ] if results is None else results)
+        music.find_spotify_match = AsyncMock(return_value=match)
         music.play_song = AsyncMock()
         return music
 
@@ -197,19 +201,22 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
         ctx = await self.play(music)
 
-        music.search_youtube.assert_not_awaited()
+        music.find_spotify_match.assert_not_awaited()
         music.play_song.assert_not_awaited()
         self.assertIn("couldn't read this Spotify track", sent_text(ctx))
 
-    async def test_track_without_youtube_match_reports_it(self):
-        music = self.make_music(results=[])
+    async def test_track_without_a_reliable_match_is_skipped(self):
+        music = self.make_music(match=None)
 
         ctx = await self.play(music)
 
         music.play_song.assert_not_awaited()
-        self.assertIn("couldn't find this Spotify track on YouTube", sent_text(ctx))
+        self.assertIn(
+            "couldn't find a reliable match for **Track — Artist** on YouTube, so I skipped it",
+            sent_text(ctx),
+        )
 
-    async def test_track_is_queued_with_its_title_while_music_plays(self):
+    async def test_track_is_queued_with_its_spotify_title_while_music_plays(self):
         music = self.make_music(playing=True)
 
         ctx = await self.play(music)
@@ -226,35 +233,16 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
             ctx = await self.play(music, "https://open.spotify.com/artist/0gxyHStUsqpMadRV0Di1Qt")
 
         session.assert_not_called()
-        music.search_youtube.assert_not_awaited()
+        music.find_spotify_match.assert_not_awaited()
         self.assertIn("Only track, album and playlist links are supported", sent_text(ctx))
 
-    async def test_spotify_track_plays_first_youtube_match_without_prompt(self):
-        music = make_music()
-        music.ensure_voice_client = AsyncMock()
-        music.handle_spotify_url = AsyncMock(return_value="Track Artist")
-        music.search_youtube = AsyncMock(return_value=[{
-            'title': 'Track — Artist',
-            'webpage_url': 'https://www.youtube.com/watch?v=abcdefghijk',
-        }])
-        music.play_song = AsyncMock()
+    async def test_spotify_track_plays_its_match_without_prompt(self):
+        music = self.make_music()
 
-        voice_client = make_voice_client()
-        music.ensure_voice_client.return_value = voice_client
+        ctx = await self.play(music)
 
-        ctx = make_ctx(voice_client=voice_client)
-
-        await Music.play.callback(
-            music,
-            ctx,
-            query="https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl",
-        )
-
-        music.search_youtube.assert_awaited_once_with("Track Artist")
-        music.play_song.assert_awaited_once_with(
-            ctx,
-            'https://www.youtube.com/watch?v=abcdefghijk',
-        )
+        music.find_spotify_match.assert_awaited_once_with(TRACK)
+        music.play_song.assert_awaited_once_with(ctx, YOUTUBE_URL)
 
 
 class SpotifyRedirectTests(unittest.IsolatedAsyncioTestCase):
@@ -271,7 +259,7 @@ class SpotifyRedirectTests(unittest.IsolatedAsyncioTestCase):
             EMBED_URL: FakeResponse(EMBED_URL, text=embed_page(track_entity())),
         })
 
-        self.assertEqual(result, "Track Artist")
+        self.assertEqual(result, TRACK)
         self.assertEqual(requested, [SHORT_URL, f"{TRACK_URL}?si=xyz", EMBED_URL])
 
     async def test_does_not_follow_redirects_to_other_hosts(self):
@@ -314,7 +302,16 @@ class SpotifyRedirectTests(unittest.IsolatedAsyncioTestCase):
             EMBED_URL: FakeResponse(EMBED_URL, text=embed_page(track_entity())),
         })
 
-        self.assertEqual(result, "Track Artist")
+        self.assertEqual(result, TRACK)
+
+    async def test_short_link_to_something_else_resolves_to_none(self):
+        result, requested = await self.resolve({
+            SHORT_URL: redirect(SHORT_URL, PLAYLIST_URL),
+            PLAYLIST_URL: FakeResponse(PLAYLIST_URL),
+        })
+
+        self.assertIsNone(result)
+        self.assertEqual(requested, [SHORT_URL, PLAYLIST_URL])
 
     async def test_short_links_must_use_https(self):
         self.assertIsNone(Music.normalize_spotify_track_url("http://spotify.link/abc123"))
@@ -328,20 +325,14 @@ class SpotifyMetadataTests(unittest.IsolatedAsyncioTestCase):
             result = await make_music().handle_spotify_url(url)
         return result, session.requested
 
-    def oembed(self, title="Track"):
-        return FakeResponse(OEMBED_URL, json={
-            'title': title,
-            'iframe_url': f"https://open.spotify.com/embed/track/{TRACK_ID}?utm_source=oembed",
-        })
-
-    async def test_uses_track_name_and_every_artist_from_the_embed(self):
-        entity = track_entity("Despacito", ["Luis Fonsi", "Daddy Yankee"])
+    async def test_reads_name_every_artist_and_duration_from_the_embed(self):
+        entity = track_entity("Despacito", ["Luis Fonsi", "Daddy Yankee"], duration=229360)
 
         result, requested = await self.resolve({
             EMBED_URL: FakeResponse(EMBED_URL, text=embed_page(entity)),
         })
 
-        self.assertEqual(result, "Despacito Luis Fonsi Daddy Yankee")
+        self.assertEqual(result, spotify_track("Despacito", ["Luis Fonsi", "Daddy Yankee"], 229360))
         self.assertEqual(requested, [EMBED_URL])
 
     async def test_resolves_spotify_uris(self):
@@ -349,55 +340,38 @@ class SpotifyMetadataTests(unittest.IsolatedAsyncioTestCase):
             EMBED_URL: FakeResponse(EMBED_URL, text=embed_page(track_entity())),
         }, url=f"spotify:track:{TRACK_ID}")
 
-        self.assertEqual(result, "Track Artist")
+        self.assertEqual(result, TRACK)
 
-    async def test_falls_back_to_oembed_when_the_embed_is_unavailable(self):
-        result, _ = await self.resolve({
-            EMBED_URL: FakeResponse(EMBED_URL, status=403),
-            OEMBED_URL: self.oembed("Track"),
-        })
+    async def test_ignores_invalid_durations(self):
+        for duration in (0, -1, "229360", True):
+            with self.subTest(duration=duration):
+                result, _ = await self.resolve({
+                    EMBED_URL: FakeResponse(EMBED_URL, text=embed_page(
+                        {**track_entity(), 'duration': duration}
+                    )),
+                })
 
-        self.assertEqual(result, "Track")
+                self.assertIsNone(result['duration_ms'])
 
-    async def test_falls_back_to_oembed_when_the_embed_layout_changes(self):
+    async def test_unreadable_embeds_resolve_to_none(self):
+        # A name alone can't be checked against YouTube results, so there is
+        # no fallback to Spotify's name-only oEmbed endpoint.
         pages = {
-            "no data script": "<html><body>Spotify</body></html>",
-            "invalid json": '<script id="__NEXT_DATA__">{not json</script>',
-            "no entity": '<script id="__NEXT_DATA__">{"props": {"pageProps": {}}}</script>',
-            "no artists": embed_page({**track_entity(), 'artists': []}),
+            "unavailable": FakeResponse(EMBED_URL, status=403),
+            "no data script": FakeResponse(EMBED_URL, text="<html><body>Spotify</body></html>"),
+            "invalid json": FakeResponse(EMBED_URL, text='<script id="__NEXT_DATA__">{not json</script>'),
+            "no entity": FakeResponse(
+                EMBED_URL, text='<script id="__NEXT_DATA__">{"props": {"pageProps": {}}}</script>'
+            ),
+            "no artists": FakeResponse(EMBED_URL, text=embed_page({**track_entity(), 'artists': []})),
+            "an album": FakeResponse(EMBED_URL, text=embed_page({**track_entity(), 'type': 'album'})),
+            "another track": FakeResponse(EMBED_URL, text=embed_page(track_entity(track_id="0" * 22))),
         }
-        for label, page in pages.items():
+        for label, response in pages.items():
             with self.subTest(label):
-                result, _ = await self.resolve({
-                    EMBED_URL: FakeResponse(EMBED_URL, text=page),
-                    OEMBED_URL: self.oembed("Track"),
-                })
+                result, _ = await self.resolve({EMBED_URL: response})
 
-                self.assertEqual(result, "Track")
-
-    async def test_ignores_embed_data_for_something_other_than_the_track(self):
-        for label, entity in {
-            "an album": {**track_entity(), 'type': 'album'},
-            "another track": track_entity(track_id="0" * 22),
-        }.items():
-            with self.subTest(label):
-                result, _ = await self.resolve({
-                    EMBED_URL: FakeResponse(EMBED_URL, text=embed_page(entity)),
-                    OEMBED_URL: self.oembed("Track"),
-                })
-
-                self.assertEqual(result, "Track")
-
-    async def test_rejects_oembed_metadata_that_is_not_for_a_track(self):
-        result, _ = await self.resolve({
-            EMBED_URL: FakeResponse(EMBED_URL, status=404),
-            OEMBED_URL: FakeResponse(OEMBED_URL, json={
-                'title': 'Some Album',
-                'iframe_url': 'https://open.spotify.com/embed/album/1ATL5GLyefJaxhQzSPVrLX',
-            }),
-        })
-
-        self.assertIsNone(result)
+                self.assertIsNone(result)
 
     async def test_network_errors_resolve_to_none(self):
         session = FakeSpotifySession({})
@@ -409,46 +383,44 @@ class SpotifyMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
 
-
 class SpotifyCollectionParsingTests(unittest.TestCase):
     def parse(self, entity, kind='playlist', entity_id=PLAYLIST_ID):
         return Music.spotify_collection_from_embed(embed_page(entity), kind, entity_id)
 
     def test_reads_the_name_and_every_track(self):
         collection = self.parse(playlist_entity([
-            list_item("Despacito", "Luis Fonsi,\u00a0Daddy Yankee"),
+            list_item("Despacito", "Luis Fonsi,\u00a0Daddy Yankee", duration=229360),
             list_item("Mr. Brightside", "The Killers"),
         ]))
 
         self.assertEqual(collection, {'name': 'Mix', 'tracks': [
-            {'query': 'Despacito Luis Fonsi, Daddy Yankee',
-             'title': 'Despacito — Luis Fonsi, Daddy Yankee'},
-            {'query': 'Mr. Brightside The Killers', 'title': 'Mr. Brightside — The Killers'},
+            spotify_track("Despacito", ["Luis Fonsi", "Daddy Yankee"], 229360),
+            spotify_track("Mr. Brightside", ["The Killers"]),
         ]})
 
-    def test_falls_back_to_the_artist_list(self):
+    def test_prefers_the_artist_list_when_there_is_one(self):
         item = {
             'uri': f"spotify:track:{TRACK_ID}",
-            'title': 'Despacito',
-            'artists': [{'name': 'Luis Fonsi'}, {'name': 'Daddy Yankee'}],
+            'title': 'Who Dat Boy',
+            'subtitle': 'Tyler, The Creator, A$AP Rocky',
+            'artists': [{'name': 'Tyler, The Creator'}, {'name': 'A$AP Rocky'}],
         }
 
         collection = self.parse(playlist_entity([item]))
 
-        self.assertEqual(collection['tracks'][0]['query'], 'Despacito Luis Fonsi, Daddy Yankee')
+        self.assertEqual(collection['tracks'][0]['artists'], ['Tyler, The Creator', 'A$AP Rocky'])
 
-    def test_skips_episodes_local_files_and_untitled_items(self):
+    def test_skips_episodes_local_files_and_items_without_title_or_artists(self):
         collection = self.parse(playlist_entity([
             {'uri': f"spotify:episode:{TRACK_ID}", 'title': 'A podcast', 'subtitle': 'Host'},
             {'uri': 'spotify:local:Artist:Album:Song:180', 'title': 'Song', 'subtitle': 'Artist'},
             list_item("", "Nobody"),
+            list_item("No artist", ""),
             "not a track",
             list_item("Track", "Artist"),
         ]))
 
-        self.assertEqual(collection['tracks'], [
-            {'query': 'Track Artist', 'title': 'Track — Artist'},
-        ])
+        self.assertEqual(collection['tracks'], [TRACK])
 
     def test_reads_albums(self):
         entity = {**playlist_entity([list_item("Track", "Artist")]),
@@ -483,7 +455,7 @@ class SpotifyCollectionResolverTests(unittest.IsolatedAsyncioTestCase):
         with patch('cogs.music.aiohttp.ClientSession', return_value=session):
             collection = await make_music().handle_spotify_collection_url(f"{PLAYLIST_URL}?si=x")
 
-        self.assertEqual(collection['tracks'], [{'query': 'Track Artist', 'title': 'Track — Artist'}])
+        self.assertEqual(collection['tracks'], [TRACK])
         self.assertEqual(session.requested, [PLAYLIST_EMBED_URL])
 
     async def test_unavailable_playlist_resolves_to_none(self):
@@ -500,14 +472,16 @@ class SpotifyCollectionResolverTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await make_music().handle_spotify_collection_url(PLAYLIST_URL))
 
 
+def numbered_track(number):
+    return spotify_track(f"Song {number}")
+
+
 def collection(count, name="Mix"):
-    return {'name': name, 'tracks': [
-        {'query': f"Song {i} Artist", 'title': f"Song {i} — Artist"} for i in range(1, count + 1)
-    ]}
+    return {'name': name, 'tracks': [numbered_track(i) for i in range(1, count + 1)]}
 
 
 def queued(number):
-    return {'url': None, 'query': f"Song {number} Artist", 'title': f"Song {number} — Artist"}
+    return {'url': None, 'spotify': numbered_track(number), 'title': f"Song {number} — Artist"}
 
 
 class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
@@ -519,9 +493,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
         music.handle_spotify_collection_url = AsyncMock(
             return_value=collection(3) if tracks is None else tracks
         )
-        music.search_youtube = AsyncMock(return_value=[
-            {'title': 'Song 1 (Official Audio)', 'webpage_url': YOUTUBE_URL},
-        ])
+        music.find_spotify_match = AsyncMock(return_value=YOUTUBE_URL)
 
         async def start_playing(ctx, url):
             self.vc.is_playing.return_value = True
@@ -540,7 +512,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
         ctx = await self.play(music)
 
-        music.search_youtube.assert_awaited_once_with("Song 1 Artist")
+        music.find_spotify_match.assert_awaited_once_with(numbered_track(1))
         music.play_song.assert_awaited_once_with(ctx, YOUTUBE_URL)
         self.assertEqual(music.queue['123'], [queued(2), queued(3)])
         self.assertIn("Added 3 tracks from **Mix** to the queue", sent_text(ctx))
@@ -551,7 +523,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
         await self.play(music)
 
-        music.search_youtube.assert_not_awaited()
+        music.find_spotify_match.assert_not_awaited()
         music.play_song.assert_not_awaited()
         self.assertEqual(
             music.queue['123'],
@@ -567,7 +539,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("(only the first 100)", sent_text(ctx))
 
     async def test_unreadable_playlist_reports_an_error(self):
-        music = self.make_music(tracks=None)
+        music = self.make_music()
         music.handle_spotify_collection_url.return_value = None
 
         ctx = await self.play(music)
@@ -589,7 +561,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
     async def test_short_link_to_a_track_plays_the_track(self):
         music = self.make_music()
         music.follow_spotify_short_link = AsyncMock(return_value=f"{TRACK_URL}?si=x")
-        music.handle_spotify_url = AsyncMock(return_value="Track Artist")
+        music.handle_spotify_url = AsyncMock(return_value=TRACK)
 
         await self.play(music, SHORT_URL)
 
@@ -603,7 +575,7 @@ class QueuedSearchTests(unittest.IsolatedAsyncioTestCase):
         music = make_music()
         self.vc = make_voice_client()
         music.voice_clients['123'] = self.vc
-        music.search_youtube = AsyncMock()
+        music.find_spotify_match = AsyncMock()
 
         async def start_playing(ctx, url):
             self.vc.is_playing.return_value = True
@@ -611,17 +583,20 @@ class QueuedSearchTests(unittest.IsolatedAsyncioTestCase):
         music.play_song = AsyncMock(side_effect=start_playing)
         return music
 
-    async def test_tracks_missing_from_youtube_are_skipped(self):
+    async def test_tracks_without_a_reliable_match_are_skipped(self):
         music = self.make_music()
         music.queue['123'] = [queued(1), queued(2)]
-        music.search_youtube.side_effect = [[], [{'title': 'Song 2', 'webpage_url': YOUTUBE_URL}]]
+        music.find_spotify_match.side_effect = [None, YOUTUBE_URL]
         ctx = make_ctx(voice_client=self.vc)
 
         await music.play_next(ctx)
 
         music.play_song.assert_awaited_once_with(ctx, YOUTUBE_URL)
         self.assertEqual(music.queue['123'], [])
-        self.assertIn("Couldn't find **Song 1 — Artist** on YouTube, skipping it.", sent_text(ctx))
+        self.assertIn(
+            "couldn't find a reliable match for **Song 1 — Artist** on YouTube, so I skipped it",
+            sent_text(ctx),
+        )
 
     async def test_tracks_that_fail_to_start_are_skipped(self):
         music = self.make_music()
@@ -644,11 +619,11 @@ class QueuedSearchTests(unittest.IsolatedAsyncioTestCase):
         music = self.make_music()
         music.queue['123'] = [queued(1), queued(2)]
 
-        async def search_then_stop(query):
+        async def search_then_stop(track):
             music.queue['123'] = []  # what %stop does
-            return [{'title': 'Song 1', 'webpage_url': YOUTUBE_URL}]
+            return YOUTUBE_URL
 
-        music.search_youtube.side_effect = search_then_stop
+        music.find_spotify_match.side_effect = search_then_stop
 
         await music.play_next(make_ctx(voice_client=self.vc))
 
