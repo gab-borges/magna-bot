@@ -25,11 +25,21 @@ def truncate(text, limit):
 class Reddit(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.reddit = praw.Reddit(
-            client_id=os.getenv("REDDIT_CLIENT_ID"),
-            client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
-            user_agent=os.getenv("REDDIT_USER_AGENT")
-        )
+        self.reddit = self.make_client()
+
+    @staticmethod
+    def make_client():
+        settings = {
+            "client_id": os.getenv("REDDIT_CLIENT_ID"),
+            "client_secret": os.getenv("REDDIT_CLIENT_SECRET"),
+            "user_agent": os.getenv("REDDIT_USER_AGENT"),
+        }
+        missing = [f"REDDIT_{name.upper()}" for name, value in settings.items() if not value]
+        if missing:
+            # Keep the rest of the bot running; %meme explains what's missing.
+            logger.warning("%s not set; %%meme is disabled", ", ".join(missing))
+            return None
+        return praw.Reddit(**settings)
 
     async def find_memes(self, subreddit_name, allow_nsfw):
         """Image posts currently hot on a subreddit."""
@@ -46,6 +56,9 @@ class Reddit(commands.Cog):
     @commands.command()
     @commands.cooldown(1, 10, commands.BucketType.user)
     async def meme(self, ctx: commands.Context):
+        if self.reddit is None:
+            return await ctx.send("⚠️ Memes aren't configured (missing Reddit API credentials).")
+
         is_nsfw = getattr(ctx.channel, "is_nsfw", None)
         allow_nsfw = bool(is_nsfw and is_nsfw())
 
@@ -80,7 +93,8 @@ class Reddit(commands.Cog):
         await ctx.send(embed=meme_embed)
 
     async def cog_unload(self):
-        await self.reddit.close()
+        if self.reddit is not None:
+            await self.reddit.close()
 
 async def setup(bot):
     await bot.add_cog(Reddit(bot))
