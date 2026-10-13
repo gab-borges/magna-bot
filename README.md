@@ -63,6 +63,13 @@ python main.py
 python -m unittest
 ```
 
+Live checks against the real Spotify and YouTube services are skipped by
+default (and in CI). To run them, optionally with a `spotify.link` URL shared
+from the Spotify app:
+```bash
+MAGNA_LIVE_TESTS=1 SPOTIFY_SHORT_LINK=https://spotify.link/... python -m unittest tests.test_spotify_live -v
+```
+
 ## Imagem no Docker Hub
 
 Cada push na branch `main` roda os testes e, se eles passarem, publica

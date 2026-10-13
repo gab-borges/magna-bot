@@ -70,6 +70,7 @@ URL_SCHEME_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
 UNSUPPORTED_URL_MESSAGE = "❌ Only YouTube video and Spotify track links are supported."
 SPOTIFY_HOSTS = {'spotify.com', 'spotify.link'}
 SPOTIFY_MAX_REDIRECTS = 5
+SPOTIFY_TRACK_URL_PREFIX = "https://open.spotify.com/track/"
 NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
@@ -1034,22 +1035,36 @@ class Music(commands.Cog):
         return f"https://open.spotify.com/track/{track_id}"
 
     @staticmethod
-    def spotify_query_from_page_title(page_title):
-        """Turn Spotify's HTML title into a useful YouTube search query."""
-        if not page_title:
+    def spotify_query_from_embed(page_html, track_id):
+        """Build a "track artists" query from the track's embed page.
+
+        The embed page carries the track's metadata as Next.js data, including
+        every artist, which oEmbed and the regular page title don't reliably do.
+        """
+        script = BeautifulSoup(page_html, 'html.parser').find('script', id='__NEXT_DATA__')
+        if script is None or not script.string:
             return None
 
-        page_title = html.unescape(page_title).strip()
-        match = re.fullmatch(
-            r'(.+?)\s+-\s+song and lyrics by\s+(.+?)\s+\|\s+Spotify',
-            page_title,
-            re.IGNORECASE,
-        )
-        if not match:
+        try:
+            entity = json.loads(script.string)['props']['pageProps']['state']['data']['entity']
+        except (ValueError, KeyError, TypeError):
             return None
 
-        track, artist = (part.strip() for part in match.groups())
-        return f"{track} {artist}" if track and artist else None
+        if not isinstance(entity, dict):
+            return None
+        if entity.get('type') != 'track' or entity.get('uri') != f"spotify:track:{track_id}":
+            return None
+
+        name = (entity.get('name') or '').strip()
+        artists = [
+            artist.get('name', '').strip()
+            for artist in entity.get('artists') or []
+            if isinstance(artist, dict)
+        ]
+        artists = [artist for artist in artists if artist]
+        if not name or not artists:
+            return None
+        return " ".join([name, *artists])
 
     async def handle_spotify_url(self, url):
         """Resolve a Spotify track to a title/artist query for YouTube."""
@@ -1064,26 +1079,27 @@ class Music(commands.Cog):
         }
 
         try:
-            # Keep both metadata attempts under one deadline so a Spotify
+            # Keep every metadata attempt under one deadline so a Spotify
             # outage cannot hold the command open indefinitely.
             async with asyncio.timeout(12):
                 async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                    # The page title normally includes both track and artist,
-                    # which is much more accurate than searching by track ID.
-                    page = await self.fetch_spotify_page(session, track_url)
-                    if page is not None:
-                        final_url, page_html = page
-                        resolved_url = self.normalize_spotify_track_url(final_url)
+                    if not track_url.startswith(SPOTIFY_TRACK_URL_PREFIX):
+                        # A short link: follow it to find out which track it is.
+                        page = await self.fetch_spotify_page(session, track_url)
+                        resolved_url = page and self.normalize_spotify_track_url(page[0])
                         if resolved_url:
                             track_url = resolved_url
-                        soup = BeautifulSoup(page_html, 'html.parser')
-                        page_title = soup.title.string if soup.title else None
-                        search_query = self.spotify_query_from_page_title(page_title)
+
+                    if track_url.startswith(SPOTIFY_TRACK_URL_PREFIX):
+                        track_id = track_url.removeprefix(SPOTIFY_TRACK_URL_PREFIX)
+                        embed_url = f"https://open.spotify.com/embed/track/{track_id}"
+                        page = await self.fetch_spotify_page(session, embed_url)
+                        search_query = page and self.spotify_query_from_embed(page[1], track_id)
                         if search_query:
                             return search_query
 
-                    # oEmbed is an official, credential-free metadata endpoint
-                    # and a fallback when Spotify changes its HTML title.
+                    # oEmbed is an official, credential-free metadata endpoint.
+                    # It only has the track name, so it is the last resort.
                     oembed_url = 'https://open.spotify.com/oembed'
                     async with session.get(
                         oembed_url, params={'url': track_url}, allow_redirects=False
