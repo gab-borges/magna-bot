@@ -1,6 +1,15 @@
 import discord
 from discord.ext import commands
 import aiohttp
+import asyncio
+import logging
+import re
+
+logger = logging.getLogger(__name__)
+
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
+CURRENCY_CODE = re.compile(r'[A-Z]{3}')
+
 
 class CoinConverter(commands.Cog):
     def __init__(self, bot):
@@ -14,42 +23,47 @@ class CoinConverter(commands.Cog):
         Usage: %coin <amount> <from_currency> <to_currency>
         Example: %coin 5 BRL USD
         """
+        # Convert currencies to uppercase
+        from_currency = from_currency.upper()
+        to_currency = to_currency.upper()
+
+        # The code goes into the API URL, so only accept ISO-style codes.
+        for code in (from_currency, to_currency):
+            if not CURRENCY_CODE.fullmatch(code):
+                await ctx.send(f"Error: `{code}` isn't a currency code (use 3 letters, like BRL).")
+                return
+
+        # Fetch exchange rates from API
         try:
-            # Convert currencies to uppercase
-            from_currency = from_currency.upper()
-            to_currency = to_currency.upper()
-            
-            # Fetch exchange rates from API
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
                 async with session.get(f"{self.api_url}{from_currency}") as response:
                     if response.status != 200:
                         await ctx.send(f"Error: Couldn't fetch exchange rates for {from_currency}.")
                         return
-                    
+
                     data = await response.json()
-                    
-                    if "rates" not in data or to_currency not in data["rates"]:
-                        await ctx.send(f"Error: Currency {to_currency} not found in exchange rates.")
-                        return
-                    
-                    # Get exchange rate and calculate converted amount
-                    exchange_rate = data["rates"][to_currency]
-                    converted_amount = amount * exchange_rate
-                    
-                    # Create and send an embedded message with the result
-                    embed = discord.Embed(
-                        title="Currency Conversion",
-                        description=f"{amount:.2f} {from_currency} = **{converted_amount:.2f} {to_currency}**",
-                        color=discord.Color.green()
-                    )
-                    embed.add_field(name="Exchange Rate", value=f"1 {from_currency} = {exchange_rate:.6f} {to_currency}", inline=False)
-                    
-                    await ctx.send(embed=embed)
-                    
-        except ValueError:
-            await ctx.send("Error: Please provide a valid amount to convert.")
-        except Exception as e:
-            await ctx.send(f"An error occurred: {str(e)}")
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            logger.exception("Could not fetch exchange rates for %s", from_currency)
+            await ctx.send("Error: The exchange rate service isn't responding. Try again later.")
+            return
+
+        if "rates" not in data or to_currency not in data["rates"]:
+            await ctx.send(f"Error: Currency {to_currency} not found in exchange rates.")
+            return
+
+        # Get exchange rate and calculate converted amount
+        exchange_rate = data["rates"][to_currency]
+        converted_amount = amount * exchange_rate
+
+        # Create and send an embedded message with the result
+        embed = discord.Embed(
+            title="Currency Conversion",
+            description=f"{amount:.2f} {from_currency} = **{converted_amount:.2f} {to_currency}**",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Exchange Rate", value=f"1 {from_currency} = {exchange_rate:.6f} {to_currency}", inline=False)
+
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(CoinConverter(bot))

@@ -2,8 +2,7 @@ discord.py[voice]>=2.7.1
 aiohttp
 asyncpraw
 google-genai
-pytz
-requests
+tzdata
 yt-dlp
 beautifulsoup4
 python-dotenv
