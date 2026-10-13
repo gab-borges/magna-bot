@@ -57,6 +57,18 @@ load_dotenv()
 
 MIN_DISCORD_DAVE_VERSION = (2, 7, 0)
 
+YOUTUBE_HOSTS = {
+    'youtube.com',
+    'www.youtube.com',
+    'm.youtube.com',
+    'music.youtube.com',
+    'youtube-nocookie.com',
+    'www.youtube-nocookie.com',
+}
+YOUTUBE_VIDEO_ID_PATTERN = re.compile(r'[A-Za-z0-9_-]{11}')
+URL_SCHEME_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
+UNSUPPORTED_URL_MESSAGE = "❌ Only YouTube video and Spotify track links are supported."
+
 class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -93,7 +105,6 @@ class Music(commands.Cog):
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
-            'nocheckcertificate': True,
             'ignoreerrors': False,
             'geo_bypass': True,
             'geo_bypass_country': 'US',
@@ -260,82 +271,36 @@ class Music(commands.Cog):
             url = self.queue[guild_id].pop(0)
             await self.play_song(ctx, url)
 
-    async def extract_youtube_id(self, url):
-        """Extract video ID from a YouTube URL"""
-        # Direct match for watch?v= parameter (most common)
-        watch_v_match = re.search(r'(?:youtube\.com\/watch\?v=|youtube\.com\/watch\?.+&v=)([a-zA-Z0-9_-]{11})', url)
-        if watch_v_match:
-            return watch_v_match.group(1)
-            
-        # Extended regex to handle more YouTube URL formats
-        youtube_regex = r'(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|(?:youtu\.be|music\.youtube\.com)\/([a-zA-Z0-9_-]{11}))'
-        match = re.search(youtube_regex, url)
-        
-        if match:
-            return match.group(1)
-        
-        # Additional checks for other URL formats
-        if 'youtube.com' in url or 'youtu.be' in url or 'music.youtube.com' in url:
-            # Check for v= parameter
-            v_param = re.search(r'[?&]v=([a-zA-Z0-9_-]{11})', url)
-            if v_param:
-                return v_param.group(1)
-                
-            # Check for youtu.be/ format
-            short_url = re.search(r'youtu\.be\/([a-zA-Z0-9_-]{11})', url)
-            if short_url:
-                return short_url.group(1)
-                
-            # Check for music.youtube.com
-            music_url = re.search(r'music\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})', url)
-            if music_url:
-                return music_url.group(1)
-                
-            # Check for embed format
-            embed_url = re.search(r'youtube\.com\/embed\/([a-zA-Z0-9_-]{11})', url)
-            if embed_url:
-                return embed_url.group(1)
-        
-        # Fallback: try to find any 11-character ID in the URL that looks like a YouTube ID
-        potential_ids = re.findall(r'([a-zA-Z0-9_-]{11})', url)
-        for potential_id in potential_ids:
-            if re.match(r'^[a-zA-Z0-9_-]{11}$', potential_id):
-                return potential_id
-                
-        return None
+    @staticmethod
+    def youtube_video_id(value):
+        """Return the video ID of a YouTube video URL, or None for anything else."""
+        parsed = urllib.parse.urlparse(value.strip())
+        if parsed.scheme not in ('http', 'https'):
+            return None
 
-    async def is_youtube_url(self, url):
-        """Check if a URL is a YouTube URL"""
-        # First check with basic domain matching
-        youtube_domains = [
-            'youtube.com', 
-            'youtu.be', 
-            'www.youtube.com', 
-            'm.youtube.com',
-            'music.youtube.com',
-            'youtube-nocookie.com'
-        ]
-        
-        for domain in youtube_domains:
-            if domain in url:
-                return True
-        
-        # Second, try pattern matching for YouTube URLs
-        youtube_patterns = [
-            r'(?:https?://)?(?:www\.)?youtube\.com/watch\?(?:.*&)?v=[\w-]+(?:&.*)?',
-            r'(?:https?://)?(?:www\.)?youtu\.be/[\w-]+(?:\?.*)?',
-            r'(?:https?://)?(?:www\.)?youtube\.com/embed/[\w-]+(?:\?.*)?',
-            r'(?:https?://)?(?:www\.)?youtube\.com/v/[\w-]+(?:\?.*)?',
-            r'(?:https?://)?(?:www\.)?youtube\.com/user/[\w-]+(?:/.*)?',
-            r'(?:https?://)?(?:www\.)?youtube\.com/channel/[\w-]+(?:/.*)?',
-            r'(?:https?://)?(?:www\.)?music\.youtube\.com/watch\?(?:.*&)?v=[\w-]+(?:&.*)?'
-        ]
-        
-        for pattern in youtube_patterns:
-            if re.match(pattern, url, re.IGNORECASE):
-                return True
-                
-        return False
+        hostname = (parsed.hostname or '').lower()
+        parts = [part for part in parsed.path.split('/') if part]
+        if hostname == 'youtu.be':
+            video_id = parts[0] if parts else None
+        elif hostname in YOUTUBE_HOSTS:
+            if parts == ['watch']:
+                video_id = urllib.parse.parse_qs(parsed.query).get('v', [None])[0]
+            elif len(parts) >= 2 and parts[0] in ('embed', 'shorts', 'live', 'v'):
+                video_id = parts[1]
+            else:
+                video_id = None
+        else:
+            return None
+
+        if not video_id or not YOUTUBE_VIDEO_ID_PATTERN.fullmatch(video_id):
+            return None
+        return video_id
+
+    @classmethod
+    def normalize_youtube_url(cls, value):
+        """Return the canonical watch URL for a YouTube video link, or None."""
+        video_id = cls.youtube_video_id(value)
+        return f"https://www.youtube.com/watch?v={video_id}" if video_id else None
 
     async def get_cached_stream(self, video_id):
         """Get stream URL from cache if available and not expired"""
@@ -369,7 +334,9 @@ class Music(commands.Cog):
         if parsed.scheme in ('http', 'https'):
             return bool(parsed.netloc)
 
-        return Path(stream_url).exists()
+        # Local playback is only allowed for files this cog downloaded itself.
+        path = Path(stream_url).resolve()
+        return path.is_file() and path.is_relative_to(self.cache_dir.resolve())
 
     def normalize_stream_data(self, stream_data, *, is_local=False):
         """Validate stream data and normalize common fields."""
@@ -646,125 +613,98 @@ class Music(commands.Cog):
     async def play_song(self, ctx, url):
         """Play a song using multiple fallback methods"""
         try:
-            # First determine if this is a YouTube URL
-            is_youtube = await self.is_youtube_url(url)
-            
-            if is_youtube:
-                # Extract the YouTube video ID
-                video_id = await self.extract_youtube_id(url)
-                if not video_id:
-                    await ctx.send("❌ Invalid YouTube URL format.")
-                    logger.error(f"Could not extract video ID from URL: {url}")
-                    return
-                
-                logger.info(f"Processing YouTube URL: {url}, Video ID: {video_id}")
-                
-                # Check cache first
-                cached_url = await self.get_cached_stream(video_id)
-                if self.is_valid_stream_url(cached_url):
-                    stream_data = {'url': cached_url, 'title': self.current_songs.get(str(ctx.guild.id), 'Cached Song')}
-                else:
-                    if cached_url:
-                        logger.warning(f"Dropping invalid cached stream URL for video {video_id}")
-                        self.stream_cache.pop(video_id, None)
+            video_id = self.youtube_video_id(url)
+            if not video_id:
+                logger.warning(f"Refusing unsupported URL: {url}")
+                await ctx.send(UNSUPPORTED_URL_MESSAGE)
+                return
 
-                    await ctx.send("🔍 Getting stream...")
-                    
-                    # Try each method in sequence
-                    stream_data = None
-                    normalized_url = f"https://www.youtube.com/watch?v={video_id}"
-                    
-                    try:
-                        with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                            info = ydl.extract_info(normalized_url, download=False)
-                            if info and info.get('url'):
-                                stream_data = self.normalize_stream_data({
-                                    'url': info['url'],
-                                    'title': info.get('title', 'Unknown Title')
-                                })
-                    except Exception as e:
-                        logger.error(f"yt-dlp error: {str(e)}")
-                        if "Sign in to confirm you're not a bot" in str(e):
-                            await ctx.send("⚠️ Refreshing connection...")
-                            if await self.update_cookies():
-                                try:
-                                    with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                                        info = ydl.extract_info(normalized_url, download=False)
-                                        if info and info.get('url'):
-                                            stream_data = self.normalize_stream_data({
-                                                'url': info['url'],
-                                                'title': info.get('title', 'Unknown Title')
-                                            })
-                                except Exception as retry_error:
-                                    logger.error(f"Retry failed: {str(retry_error)}")
-                    
-                    # Try alternative methods if main method fails
-                    if not stream_data:
-                        for method in range(1, 6):  # Try up to 5 alternative methods
-                            try:
-                                if method == 1:
-                                    stream_data = await self.get_piped_stream(video_id)
-                                elif method == 2:
-                                    stream_data = await self.get_invidious_stream(video_id)
-                                elif method == 3:
-                                    stream_data = await self.get_direct_stream(video_id)
-                                elif method == 4:
-                                    stream_data = await self.get_ytmusic_stream(video_id)
-                                elif method == 5:
-                                    # Try downloading as last resort
-                                    output_path = self.cache_dir / f"{video_id}.mp3"
-                                    if not output_path.exists():
-                                        download_opts = self.ydl_opts.copy()
-                                        download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
-                                        with yt_dlp.YoutubeDL(download_opts) as ydl:
-                                            info = ydl.extract_info(normalized_url, download=True)
-                                            downloaded_path = self.find_downloaded_audio(video_id)
-                                            stream_data = self.normalize_stream_data({
-                                                'url': str(downloaded_path or output_path),
-                                                'title': info.get('title', f"Downloaded Song"),
-                                                'is_local': True
-                                            }, is_local=True)
-                                
-                                if stream_data:
-                                    break
-                                
-                                await ctx.send("⏳ Trying alternative source...")
-                                
-                            except Exception as e:
-                                logger.error(f"Alternative method {method} failed: {str(e)}")
-                                continue
-                    
-                    stream_data = self.normalize_stream_data(stream_data)
+            normalized_url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.info(f"Processing YouTube URL: {url}, Video ID: {video_id}")
 
-                    if not stream_data:
-                        await ctx.send("❌ Unable to play this track. Please try another.")
-                        return
-                    
-                    # Cache successful stream URL if it's not a local file
-                    if not stream_data.get('is_local', False):
-                        await self.cache_stream(video_id, stream_data['url'])
-                
+            # Check cache first
+            cached_url = await self.get_cached_stream(video_id)
+            if self.is_valid_stream_url(cached_url):
+                stream_data = {'url': cached_url, 'title': self.current_songs.get(str(ctx.guild.id), 'Cached Song')}
             else:
-                # For non-YouTube URLs
+                if cached_url:
+                    logger.warning(f"Dropping invalid cached stream URL for video {video_id}")
+                    self.stream_cache.pop(video_id, None)
+
+                await ctx.send("🔍 Getting stream...")
+
+                # Try each method in sequence
+                stream_data = None
+
                 try:
                     with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                        if not info or 'url' not in info:
-                            await ctx.send("❌ Unable to process this URL.")
-                            return
-                        
-                        stream_data = self.normalize_stream_data({
-                            'url': info['url'],
-                            'title': info.get('title', 'Unknown Title'),
-                            'is_local': False
-                        })
-                        if not stream_data:
-                            await ctx.send("❌ Unable to process this URL.")
-                            return
+                        info = ydl.extract_info(normalized_url, download=False)
+                        if info and info.get('url'):
+                            stream_data = self.normalize_stream_data({
+                                'url': info['url'],
+                                'title': info.get('title', 'Unknown Title')
+                            })
                 except Exception as e:
-                    logger.error(f"Non-YouTube URL processing error: {str(e)}")
-                    await ctx.send("❌ Unable to process this URL.")
+                    logger.error(f"yt-dlp error: {str(e)}")
+                    if "Sign in to confirm you're not a bot" in str(e):
+                        await ctx.send("⚠️ Refreshing connection...")
+                        if await self.update_cookies():
+                            try:
+                                with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                                    info = ydl.extract_info(normalized_url, download=False)
+                                    if info and info.get('url'):
+                                        stream_data = self.normalize_stream_data({
+                                            'url': info['url'],
+                                            'title': info.get('title', 'Unknown Title')
+                                        })
+                            except Exception as retry_error:
+                                logger.error(f"Retry failed: {str(retry_error)}")
+
+                # Try alternative methods if main method fails
+                if not stream_data:
+                    for method in range(1, 6):  # Try up to 5 alternative methods
+                        try:
+                            if method == 1:
+                                stream_data = await self.get_piped_stream(video_id)
+                            elif method == 2:
+                                stream_data = await self.get_invidious_stream(video_id)
+                            elif method == 3:
+                                stream_data = await self.get_direct_stream(video_id)
+                            elif method == 4:
+                                stream_data = await self.get_ytmusic_stream(video_id)
+                            elif method == 5:
+                                # Try downloading as last resort
+                                output_path = self.cache_dir / f"{video_id}.mp3"
+                                if not output_path.exists():
+                                    download_opts = self.ydl_opts.copy()
+                                    download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
+                                    with yt_dlp.YoutubeDL(download_opts) as ydl:
+                                        info = ydl.extract_info(normalized_url, download=True)
+                                        downloaded_path = self.find_downloaded_audio(video_id)
+                                        stream_data = self.normalize_stream_data({
+                                            'url': str(downloaded_path or output_path),
+                                            'title': info.get('title', f"Downloaded Song"),
+                                            'is_local': True
+                                        }, is_local=True)
+
+                            if stream_data:
+                                break
+
+                            await ctx.send("⏳ Trying alternative source...")
+
+                        except Exception as e:
+                            logger.error(f"Alternative method {method} failed: {str(e)}")
+                            continue
+
+                stream_data = self.normalize_stream_data(stream_data)
+
+                if not stream_data:
+                    await ctx.send("❌ Unable to play this track. Please try another.")
                     return
+
+                # Cache successful stream URL if it's not a local file
+                if not stream_data.get('is_local', False):
+                    await self.cache_stream(video_id, stream_data['url'])
             
             # Create audio source and play
             try:
@@ -784,27 +724,24 @@ class Music(commands.Cog):
                     except Exception as e:
                         if "403 Forbidden" in str(e):
                             await ctx.send("⚠️ Stream expired, retrying...")
-                            if is_youtube:
-                                try:
-                                    output_path = self.cache_dir / f"{video_id}.mp3"
-                                    download_opts = self.ydl_opts.copy()
-                                    download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
-                                    with yt_dlp.YoutubeDL(download_opts) as ydl:
-                                        info = ydl.extract_info(normalized_url, download=True)
-                                        downloaded_path = self.find_downloaded_audio(video_id)
-                                        local_stream_data = self.normalize_stream_data({
-                                            'url': str(downloaded_path or output_path),
-                                            'title': info.get('title', stream_data['title']),
-                                            'is_local': True
-                                        }, is_local=True)
-                                        if not local_stream_data:
-                                            raise Exception("Downloaded audio file was not found")
-                                        stream_data = local_stream_data
-                                        source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
-                                except Exception as dl_err:
-                                    logger.error(f"Download after 403 error failed: {str(dl_err)}")
-                                    raise Exception("Unable to play this track")
-                            else:
+                            try:
+                                output_path = self.cache_dir / f"{video_id}.mp3"
+                                download_opts = self.ydl_opts.copy()
+                                download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
+                                with yt_dlp.YoutubeDL(download_opts) as ydl:
+                                    info = ydl.extract_info(normalized_url, download=True)
+                                    downloaded_path = self.find_downloaded_audio(video_id)
+                                    local_stream_data = self.normalize_stream_data({
+                                        'url': str(downloaded_path or output_path),
+                                        'title': info.get('title', stream_data['title']),
+                                        'is_local': True
+                                    }, is_local=True)
+                                    if not local_stream_data:
+                                        raise Exception("Downloaded audio file was not found")
+                                    stream_data = local_stream_data
+                                    source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
+                            except Exception as dl_err:
+                                logger.error(f"Download after 403 error failed: {str(dl_err)}")
                                 raise Exception("Unable to play this track")
                         else:
                             raise Exception("Unable to play this track")
@@ -1116,43 +1053,22 @@ class Music(commands.Cog):
                     await self.play_song(ctx, url)
                 return
 
-            url_pattern = re.compile(
-                r'^(?:http|ftp)s?://'
-                r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
-                r'localhost|'
-                r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
-                r'(?::\d+)?'
-                r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+            if URL_SCHEME_PATTERN.match(query):
+                url = self.normalize_youtube_url(query)
+                if not url:
+                    return await ctx.send(UNSUPPORTED_URL_MESSAGE)
 
-            if url_pattern.match(query):
-                is_youtube = await self.is_youtube_url(query)
-                
-                if is_youtube:
-                    video_id = await self.extract_youtube_id(query)
-                    if not video_id:
-                        logger.error(f"Could not extract video ID from URL: {query}")
-                    
-                    try:
-                        if vc.is_playing():
-                            self.queue[guild_id].append(query)
-                            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                                info = ydl.extract_info(query, download=False)
-                                await ctx.send(f"🎵 Added to queue: **{info['title']}**")
-                        else:
-                            await self.play_song(ctx, query)
-                    except Exception as e:
-                        logger.error(f"YouTube playback error: {str(e)}")
-                        await ctx.send("❌ Unable to play this track.")
-                else:
-                    try:
-                        if vc.is_playing():
-                            self.queue[guild_id].append(query)
-                            await ctx.send("🎵 Added to queue")
-                        else:
-                            await self.play_song(ctx, query)
-                    except Exception as e:
-                        logger.error(f"Non-YouTube URL error: {str(e)}")
-                        await ctx.send("❌ Unable to play this track.")
+                try:
+                    if vc.is_playing():
+                        self.queue[guild_id].append(url)
+                        with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                            info = ydl.extract_info(url, download=False)
+                            await ctx.send(f"🎵 Added to queue: **{info['title']}**")
+                    else:
+                        await self.play_song(ctx, url)
+                except Exception as e:
+                    logger.error(f"YouTube playback error: {str(e)}")
+                    await ctx.send("❌ Unable to play this track.")
             else:
                 await ctx.send("🔍 Searching...")
                 results = await self.search_youtube(query)
