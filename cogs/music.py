@@ -69,6 +69,7 @@ YOUTUBE_VIDEO_ID_PATTERN = re.compile(r'[A-Za-z0-9_-]{11}')
 URL_SCHEME_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
 UNSUPPORTED_URL_MESSAGE = "❌ Only YouTube video and Spotify track links are supported."
 NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -279,18 +280,27 @@ class Music(commands.Cog):
         author_channel = ctx.author.voice.channel if ctx.author.voice else None
         return author_channel == vc.channel
 
-    async def play_or_enqueue(self, ctx, vc, url):
+    async def play_or_enqueue(self, ctx, vc, url, title=None):
         """Start the track right away, or queue it when the player is busy.
 
-        Returns True when the track was queued.
+        Returns the queue entry when the track was queued, otherwise None.
         """
         guild_id = str(ctx.guild.id)
         async with self.playback_lock(guild_id):
             if self.is_player_busy(vc):
-                self.queue.setdefault(guild_id, []).append(url)
-                return True
+                entry = {'url': url, 'title': title or url}
+                self.queue.setdefault(guild_id, []).append(entry)
+                return entry
             await self.play_song(ctx, url)
-            return False
+            return None
+
+    async def extract_info(self, opts, url, *, download=False):
+        """Run yt-dlp in a worker thread so slow extractions don't stall the bot."""
+        def run():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=download)
+
+        return await asyncio.to_thread(run)
 
     def after_playback(self, ctx, error):
         """Called from discord.py's audio thread when a track ends."""
@@ -315,8 +325,8 @@ class Music(commands.Cog):
 
             if guild_id in self.queue and self.queue[guild_id]:
                 # Get next song from queue
-                url = self.queue[guild_id].pop(0)
-                await self.play_song(ctx, url)
+                entry = self.queue[guild_id].pop(0)
+                await self.play_song(ctx, entry['url'])
 
     @staticmethod
     def youtube_video_id(value):
@@ -363,9 +373,17 @@ class Music(commands.Cog):
             logger.warning(f"Refusing to cache invalid stream URL for video {video_id}")
             return
 
+        now = time.time()
+        expired = [
+            cached_id for cached_id, cache_data in self.stream_cache.items()
+            if now - cache_data['timestamp'] >= self.cache_timeout
+        ]
+        for cached_id in expired:
+            del self.stream_cache[cached_id]
+
         self.stream_cache[video_id] = {
             'url': stream_url,
-            'timestamp': time.time()
+            'timestamp': now
         }
 
     def is_valid_stream_url(self, stream_url):
@@ -426,7 +444,7 @@ class Music(commands.Cog):
             
             # Try to get stream URL from YouTube directly
             url = f"https://www.youtube.com/watch?v={video_id}"
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
                 async with session.get(url, headers=headers) as response:
                     if response.status == 200:
                         html = await response.text()
@@ -459,7 +477,7 @@ class Music(commands.Cog):
         for instance in self.piped_instances:
             try:
                 api_url = f"{instance}/streams/{video_id}"
-                response = requests.get(api_url, timeout=10)
+                response = await asyncio.to_thread(requests.get, api_url, timeout=10)
                 
                 if response.status_code == 200:
                     data = response.json()
@@ -496,7 +514,7 @@ class Music(commands.Cog):
         for instance in self.invidious_instances:
             try:
                 api_url = f"{instance}/api/v1/videos/{video_id}"
-                response = requests.get(api_url, timeout=10)
+                response = await asyncio.to_thread(requests.get, api_url, timeout=10)
                 
                 if response.status_code == 200:
                     data = response.json()
@@ -547,7 +565,7 @@ class Music(commands.Cog):
             
             for src in stream_sources:
                 try:
-                    response = requests.get(src, headers=headers, timeout=10)
+                    response = await asyncio.to_thread(requests.get, src, headers=headers, timeout=10)
                     if response.status_code == 200:
                         content_type = response.headers.get('Content-Type', '')
                         if 'application/json' in content_type:
@@ -591,8 +609,8 @@ class Music(commands.Cog):
                 'Accept-Language': 'en-US,en;q=0.9'
             }
             
-            session = aiohttp.ClientSession()
-            async with session.get(search_url, headers=headers) as response:
+            async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session, \
+                    session.get(search_url, headers=headers) as response:
                 if response.status == 200:
                     html = await response.text()
                     
@@ -620,10 +638,8 @@ class Music(commands.Cog):
                             'webpage_url': f"https://www.youtube.com/watch?v={vid_id}"
                         })
                     
-                    await session.close()
                     return formatted_results
             
-            await session.close()
             return []
         except Exception as e:
             print(f"Direct search error: {str(e)}")
@@ -684,26 +700,24 @@ class Music(commands.Cog):
                 stream_data = None
 
                 try:
-                    with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                        info = ydl.extract_info(normalized_url, download=False)
-                        if info and info.get('url'):
-                            stream_data = self.normalize_stream_data({
-                                'url': info['url'],
-                                'title': info.get('title', 'Unknown Title')
-                            })
+                    info = await self.extract_info(self.ydl_opts, normalized_url)
+                    if info and info.get('url'):
+                        stream_data = self.normalize_stream_data({
+                            'url': info['url'],
+                            'title': info.get('title', 'Unknown Title')
+                        })
                 except Exception as e:
                     logger.error(f"yt-dlp error: {str(e)}")
                     if "Sign in to confirm you're not a bot" in str(e):
                         await ctx.send("⚠️ Refreshing connection...")
                         if await self.update_cookies():
                             try:
-                                with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                                    info = ydl.extract_info(normalized_url, download=False)
-                                    if info and info.get('url'):
-                                        stream_data = self.normalize_stream_data({
-                                            'url': info['url'],
-                                            'title': info.get('title', 'Unknown Title')
-                                        })
+                                info = await self.extract_info(self.ydl_opts, normalized_url)
+                                if info and info.get('url'):
+                                    stream_data = self.normalize_stream_data({
+                                        'url': info['url'],
+                                        'title': info.get('title', 'Unknown Title')
+                                    })
                             except Exception as retry_error:
                                 logger.error(f"Retry failed: {str(retry_error)}")
 
@@ -725,14 +739,13 @@ class Music(commands.Cog):
                                 if not output_path.exists():
                                     download_opts = self.ydl_opts.copy()
                                     download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
-                                    with yt_dlp.YoutubeDL(download_opts) as ydl:
-                                        info = ydl.extract_info(normalized_url, download=True)
-                                        downloaded_path = self.find_downloaded_audio(video_id)
-                                        stream_data = self.normalize_stream_data({
-                                            'url': str(downloaded_path or output_path),
-                                            'title': info.get('title', f"Downloaded Song"),
-                                            'is_local': True
-                                        }, is_local=True)
+                                    info = await self.extract_info(download_opts, normalized_url, download=True)
+                                    downloaded_path = self.find_downloaded_audio(video_id)
+                                    stream_data = self.normalize_stream_data({
+                                        'url': str(downloaded_path or output_path),
+                                        'title': info.get('title', f"Downloaded Song"),
+                                        'is_local': True
+                                    }, is_local=True)
 
                             if stream_data:
                                 break
@@ -775,18 +788,17 @@ class Music(commands.Cog):
                                 output_path = self.cache_dir / f"{video_id}.mp3"
                                 download_opts = self.ydl_opts.copy()
                                 download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
-                                with yt_dlp.YoutubeDL(download_opts) as ydl:
-                                    info = ydl.extract_info(normalized_url, download=True)
-                                    downloaded_path = self.find_downloaded_audio(video_id)
-                                    local_stream_data = self.normalize_stream_data({
-                                        'url': str(downloaded_path or output_path),
-                                        'title': info.get('title', stream_data['title']),
-                                        'is_local': True
-                                    }, is_local=True)
-                                    if not local_stream_data:
-                                        raise Exception("Downloaded audio file was not found")
-                                    stream_data = local_stream_data
-                                    source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
+                                info = await self.extract_info(download_opts, normalized_url, download=True)
+                                downloaded_path = self.find_downloaded_audio(video_id)
+                                local_stream_data = self.normalize_stream_data({
+                                    'url': str(downloaded_path or output_path),
+                                    'title': info.get('title', stream_data['title']),
+                                    'is_local': True
+                                }, is_local=True)
+                                if not local_stream_data:
+                                    raise Exception("Downloaded audio file was not found")
+                                stream_data = local_stream_data
+                                source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
                             except Exception as dl_err:
                                 logger.error(f"Download after 403 error failed: {str(dl_err)}")
                                 raise Exception("Unable to play this track")
@@ -834,19 +846,18 @@ class Music(commands.Cog):
                 'http_headers': self.ydl_opts.get('http_headers')
             }
             
-            with yt_dlp.YoutubeDL(search_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch10:{query}", download=False)
-                if 'entries' in info and info['entries']:
-                    # Format results
-                    formatted_results = []
-                    for entry in info['entries']:
-                        formatted_results.append({
-                            'id': entry.get('id'),
-                            'title': entry.get('title', 'Unknown Title'),
-                            'duration_string': entry.get('duration_string', 'Unknown'),
-                            'webpage_url': entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id')}"
-                        })
-                    return formatted_results
+            info = await self.extract_info(search_opts, f"ytsearch10:{query}")
+            if 'entries' in info and info['entries']:
+                # Format results
+                formatted_results = []
+                for entry in info['entries']:
+                    formatted_results.append({
+                        'id': entry.get('id'),
+                        'title': entry.get('title', 'Unknown Title'),
+                        'duration_string': entry.get('duration_string', 'Unknown'),
+                        'webpage_url': entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id')}"
+                    })
+                return formatted_results
                     
         except Exception as e:
             print(f"yt-dlp search error: {str(e)}")
@@ -864,7 +875,7 @@ class Music(commands.Cog):
             encoded_query = urllib.parse.quote(query)
             api_url = f"{instance}/api/v1/search?q={encoded_query}&type=video"
             
-            response = requests.get(api_url, timeout=10)
+            response = await asyncio.to_thread(requests.get, api_url, timeout=10)
             if response.status_code == 200:
                 results = response.json()
                 
@@ -892,7 +903,7 @@ class Music(commands.Cog):
             encoded_query = urllib.parse.quote(query)
             api_url = f"{instance}/search?q={encoded_query}&filter=videos"
             
-            response = requests.get(api_url, timeout=10)
+            response = await asyncio.to_thread(requests.get, api_url, timeout=10)
             if response.status_code == 200:
                 results = response.json()
                 
@@ -1098,7 +1109,7 @@ class Music(commands.Cog):
                     return await ctx.send("❌ I couldn't find this Spotify track on YouTube.")
 
                 selected = results[0]
-                if await self.play_or_enqueue(ctx, vc, selected['webpage_url']):
+                if await self.play_or_enqueue(ctx, vc, selected['webpage_url'], selected['title']):
                     await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
                 return
 
@@ -1108,10 +1119,11 @@ class Music(commands.Cog):
                     return await ctx.send(UNSUPPORTED_URL_MESSAGE)
 
                 try:
-                    if await self.play_or_enqueue(ctx, vc, url):
-                        with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                            info = ydl.extract_info(url, download=False)
-                            await ctx.send(f"🎵 Added to queue: **{info['title']}**")
+                    entry = await self.play_or_enqueue(ctx, vc, url)
+                    if entry:
+                        info = await self.extract_info(self.ydl_opts, url)
+                        entry['title'] = info.get('title') or entry['title']
+                        await ctx.send(f"🎵 Added to queue: **{entry['title']}**")
                 except Exception as e:
                     logger.error(f"YouTube playback error: {str(e)}")
                     await ctx.send("❌ Unable to play this track.")
@@ -1154,7 +1166,7 @@ class Music(commands.Cog):
                         return await ctx.send("❌ Search cancelled.")
 
                     selected = results[int(msg.content) - 1]
-                    if await self.play_or_enqueue(ctx, vc, selected['webpage_url']):
+                    if await self.play_or_enqueue(ctx, vc, selected['webpage_url'], selected['title']):
                         await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
 
                 except asyncio.TimeoutError:
@@ -1264,15 +1276,10 @@ class Music(commands.Cog):
         if guild_id in self.current_songs:
             embed.add_field(name="Now Playing", value=self.current_songs[guild_id], inline=False)
         
-        # Add queued songs
-        with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-            for i, url in enumerate(self.queue[guild_id], 1):
-                try:
-                    info = ydl.extract_info(url, download=False)
-                    embed.add_field(name=f"{i}. ", value=info['title'], inline=False)
-                except:
-                    embed.add_field(name=f"{i}. ", value="Unable to fetch title", inline=False)
-                
+        # Titles are stored when songs are queued, so listing needs no network.
+        for i, entry in enumerate(self.queue[guild_id], 1):
+            embed.add_field(name=f"{i}. ", value=entry['title'], inline=False)
+
         await ctx.send(embed=embed)
 
     @commands.command(name="loop")

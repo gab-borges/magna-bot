@@ -13,6 +13,11 @@ from tests.music_helpers import (
 
 VIDEO_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 OTHER_URL = "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+OTHER_ENTRY = {'url': OTHER_URL, 'title': 'Other song'}
+
+
+def queued_urls(music):
+    return [entry['url'] for entry in music.queue['123']]
 
 
 class PausedPlayerTests(unittest.IsolatedAsyncioTestCase):
@@ -24,7 +29,7 @@ class PausedPlayerTests(unittest.IsolatedAsyncioTestCase):
             voice_client=self.vc,
         )
         self.music = make_music()
-        self.music.queue['123'] = [OTHER_URL]
+        self.music.queue['123'] = [OTHER_ENTRY]
         self.music.ensure_voice_client = AsyncMock(return_value=self.vc)
         self.music.play_song = AsyncMock()
 
@@ -44,7 +49,7 @@ class PausedPlayerTests(unittest.IsolatedAsyncioTestCase):
             await Music.play.callback(self.music, self.ctx, query=VIDEO_URL)
 
         self.music.play_song.assert_not_awaited()
-        self.assertEqual(self.music.queue['123'], [OTHER_URL, VIDEO_URL])
+        self.assertEqual(queued_urls(self.music), [OTHER_URL, VIDEO_URL])
 
     async def test_search_selection_while_paused_queues(self):
         self.music.search_youtube = AsyncMock(return_value=[
@@ -57,7 +62,7 @@ class PausedPlayerTests(unittest.IsolatedAsyncioTestCase):
         await Music.play.callback(self.music, self.ctx, query="some song")
 
         self.music.play_song.assert_not_awaited()
-        self.assertEqual(self.music.queue['123'], [OTHER_URL, VIDEO_URL])
+        self.assertEqual(queued_urls(self.music), [OTHER_URL, VIDEO_URL])
 
 
 class VoiceChannelPermissionTests(unittest.IsolatedAsyncioTestCase):
@@ -65,7 +70,7 @@ class VoiceChannelPermissionTests(unittest.IsolatedAsyncioTestCase):
         self.bot_channel = object()
         self.vc = make_voice_client(playing=True, channel=self.bot_channel)
         self.music = make_music()
-        self.music.queue['123'] = [OTHER_URL]
+        self.music.queue['123'] = [OTHER_ENTRY]
         self.music.current_urls['123'] = VIDEO_URL
         self.music.ensure_voice_client = AsyncMock(return_value=self.vc)
         self.music.play_song = AsyncMock()
@@ -85,7 +90,7 @@ class VoiceChannelPermissionTests(unittest.IsolatedAsyncioTestCase):
                 self.vc.stop.assert_not_called()
                 self.vc.pause.assert_not_called()
                 self.music.disconnect_voice_client.assert_not_awaited()
-                self.assertEqual(self.music.queue['123'], [OTHER_URL])
+                self.assertEqual(self.music.queue['123'], [OTHER_ENTRY])
                 self.assertFalse(self.music.loop_enabled.get('123'))
                 self.assertIn("voice channel", sent_text(ctx))
 
@@ -117,7 +122,7 @@ class VoiceChannelPermissionTests(unittest.IsolatedAsyncioTestCase):
 
         self.music.ensure_voice_client.assert_not_awaited()
         self.music.play_song.assert_not_awaited()
-        self.assertEqual(self.music.queue['123'], [OTHER_URL])
+        self.assertEqual(self.music.queue['123'], [OTHER_ENTRY])
         self.assertIn("voice channel", sent_text(ctx))
 
     async def test_play_from_another_channel_may_move_an_idle_bot(self):
@@ -163,13 +168,13 @@ class PlaybackSchedulingTests(unittest.IsolatedAsyncioTestCase):
         vc = make_voice_client(playing=True)
         music = make_music()
         music.voice_clients['123'] = vc
-        music.queue['123'] = [OTHER_URL]
+        music.queue['123'] = [OTHER_ENTRY]
         music.play_song = AsyncMock()
 
         await music.play_next(make_ctx(voice_client=vc))
 
         music.play_song.assert_not_awaited()
-        self.assertEqual(music.queue['123'], [OTHER_URL])
+        self.assertEqual(music.queue['123'], [OTHER_ENTRY])
 
     async def test_track_end_callback_does_not_wait_for_the_next_track(self):
         release = asyncio.Event()
