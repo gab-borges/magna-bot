@@ -10,8 +10,9 @@ from pathlib import Path
 import discord
 import yt_dlp
 from discord.ext import commands
+from ytmusicapi import YTMusic
 
-from magna import spotify, youtube
+from magna import matching, spotify, youtube
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,13 @@ class VoiceGatewayDiagnosticHandler(logging.Handler):
 MIN_DISCORD_DAVE_VERSION = (2, 7, 0)
 
 URL_SCHEME_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
-UNSUPPORTED_URL_MESSAGE = "❌ Only YouTube video and Spotify track links are supported."
+UNSUPPORTED_URL_MESSAGE = (
+    "❌ Only YouTube video links and Spotify track, album and playlist links are supported."
+)
+# Each queued Spotify track costs a YouTube lookup when its turn comes.
+# Spotify's embed pages list at most 100 tracks anyway, without the total.
+SPOTIFY_COLLECTION_LIMIT = 100
+QUEUE_DISPLAY_LIMIT = 20
 NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
 # Stream URLs carry their own expiry; stop reusing them a bit before it.
 STREAM_EXPIRY_MARGIN = 300
@@ -55,6 +62,7 @@ class Music(commands.Cog):
         self.queue = {}
         self.search_results = {}
         self.playback_locks = {}
+        self.ytmusic = None  # created on first use
         self.stream_cache = {}  # Cache for successful stream URLs
         self.downloaded_titles = {}  # video_id -> title of a downloaded track
         self.cache_timeout = 3600  # Cache timeout in seconds (1 hour)
@@ -291,10 +299,22 @@ class Music(commands.Cog):
                     return
 
             # A track that can't be played must not stall the rest of the queue.
-            while self.queue.get(guild_id):
-                entry = self.queue[guild_id].pop(0)
-                if await self.play_song(ctx, entry['url']):
+            while self.queue.get(guild_id) and vc.is_connected():
+                pending = self.queue[guild_id]
+                entry = pending.pop(0)
+                url = entry['url'] or await self.find_queued_track(ctx, entry)
+                # %stop and %leave replace the queue; don't play into a cleared one.
+                if self.queue.get(guild_id) is not pending:
                     return
+                if url and await self.play_song(ctx, url):
+                    return
+
+    async def find_queued_track(self, ctx, entry):
+        """Find the YouTube video for a queued Spotify track, e.g. from a playlist."""
+        url = await self.find_spotify_match(entry['spotify'])
+        if not url:
+            await ctx.send(self.no_match_message(entry['spotify']))
+        return url
 
     def is_cache_entry_fresh(self, cache_data, now):
         if now - cache_data['timestamp'] >= self.cache_timeout:
@@ -574,11 +594,165 @@ class Music(commands.Cog):
             for entry in (info or {}).get('entries') or []
         ]
 
+    def spotify_user_agent(self):
+        return self.ydl_opts['http_headers']['User-Agent']
+
     async def handle_spotify_url(self, url):
-        """Resolve a Spotify track to a title/artist query for YouTube."""
-        return await spotify.resolve_track(
-            url, user_agent=self.ydl_opts['http_headers']['User-Agent']
+        """Resolve a Spotify track to its name, artists and duration."""
+        return await spotify.resolve_track(url, user_agent=self.spotify_user_agent())
+
+    async def handle_spotify_collection_url(self, url):
+        """Resolve a Spotify album or playlist to its name and tracks."""
+        return await spotify.resolve_collection(url, user_agent=self.spotify_user_agent())
+
+    async def follow_spotify_short_link(self, url):
+        return await spotify.follow_short_link(url, user_agent=self.spotify_user_agent())
+
+    async def ytmusic_candidates(self, query, kind):
+        """Search YouTube Music ("songs" or "videos") without signing in."""
+        if self.ytmusic is None:
+            self.ytmusic = await asyncio.to_thread(YTMusic)
+        results = await asyncio.to_thread(self.ytmusic.search, query, filter=kind, limit=10)
+        candidates = []
+        for result in results[:10]:
+            video_id = result.get('videoId') or ''
+            if not youtube.VIDEO_ID_PATTERN.fullmatch(video_id):
+                continue
+            artists = " ".join(
+                artist.get('name') or ''
+                for artist in result.get('artists') or []
+                if isinstance(artist, dict)
+            )
+            title = result.get('title') or ''
+            candidates.append({
+                'video_id': video_id,
+                'title': title,
+                # Songs credit their artists; videos may only name them in the title.
+                'artist_text': artists if kind == 'songs' else f"{artists} {title}",
+                'duration': result.get('duration_seconds'),
+            })
+        return candidates
+
+    async def youtube_candidates(self, query):
+        """Search regular YouTube with yt-dlp."""
+        def search_opts():
+            return {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+                'cookiefile': self.ydl_opts.get('cookiefile'),
+                'http_headers': self.ydl_opts.get('http_headers'),
+            }
+
+        info = await self.extract_with_cookie_retry(search_opts, f"ytsearch10:{query}")
+        candidates = []
+        for entry in (info or {}).get('entries') or []:
+            video_id = entry.get('id') or ''
+            if not youtube.VIDEO_ID_PATTERN.fullmatch(video_id):
+                continue
+            title = entry.get('title') or ''
+            channel = entry.get('channel') or entry.get('uploader') or ''
+            candidates.append({
+                'video_id': video_id,
+                'title': title,
+                'artist_text': f"{channel} {title}",
+                'duration': entry.get('duration'),
+            })
+        return candidates
+
+    async def find_spotify_match(self, track):
+        """Return the YouTube URL of the same recording as a Spotify track, or None.
+
+        Official song uploads on YouTube Music are tried first, then its videos,
+        then regular YouTube. Results that don't match the track's title,
+        artists and duration are never played.
+        """
+        query = " ".join([track['name'], *track['artists']])
+        searches = (
+            ("YouTube Music songs", lambda: self.ytmusic_candidates(query, 'songs')),
+            ("YouTube Music videos", lambda: self.ytmusic_candidates(query, 'videos')),
+            ("YouTube", lambda: self.youtube_candidates(query)),
         )
+        for label, search in searches:
+            try:
+                candidates = await search()
+            except Exception as e:
+                logger.warning("%s search failed for %r: %s", label, query, e)
+                continue
+
+            match = matching.pick_match(track, candidates)
+            if match:
+                logger.info("Matched %r to %s %s", query, label, match['video_id'])
+                return f"https://www.youtube.com/watch?v={match['video_id']}"
+
+        logger.info("No reliable YouTube match for %r", query)
+        return None
+
+    @staticmethod
+    def no_match_message(track):
+        return (
+            f"⏭️ I couldn't find a reliable match for **{spotify.track_title(track)}** "
+            f"on YouTube, so I skipped it."
+        )
+
+    async def play_spotify(self, ctx, vc, reference):
+        """Play a Spotify track, or queue every track of an album or playlist."""
+        if spotify.is_short_link(reference):
+            await ctx.send("🎵 Resolving Spotify link...")
+            reference = await self.follow_spotify_short_link(reference) or reference
+
+        if spotify.entity(reference, spotify.COLLECTION_KINDS):
+            await ctx.send("🎵 Reading Spotify tracks...")
+            collection = await self.handle_spotify_collection_url(reference)
+            if not collection:
+                return await ctx.send("❌ I couldn't read the tracks of this Spotify album or playlist.")
+            return await self.enqueue_spotify_collection(ctx, vc, collection)
+
+        await ctx.send("🎵 Resolving Spotify track...")
+        track = await self.handle_spotify_url(reference)
+        if not track:
+            return await ctx.send(
+                "❌ I couldn't read this Spotify track. "
+                "Only track, album and playlist links are supported."
+            )
+
+        url = await self.find_spotify_match(track)
+        if not url:
+            return await ctx.send(self.no_match_message(track))
+
+        title = spotify.track_title(track)
+        if await self.play_or_enqueue(ctx, vc, url, title):
+            await ctx.send(f"🎵 Added to queue: **{title}**")
+
+    async def enqueue_spotify_collection(self, ctx, vc, collection):
+        """Queue an album's or playlist's tracks and start playing if idle.
+
+        Each track is looked up on YouTube only when its turn comes, so a long
+        playlist doesn't fire a burst of searches.
+        """
+        guild_id = str(ctx.guild.id)
+        tracks = collection['tracks'][:SPOTIFY_COLLECTION_LIMIT]
+        entries = [
+            {'url': None, 'spotify': track, 'title': spotify.track_title(track)}
+            for track in tracks
+        ]
+
+        async with self.playback_lock(guild_id):
+            self.queue.setdefault(guild_id, []).extend(entries)
+            idle = not self.is_player_busy(vc)
+
+        message = f"🎵 Added {len(entries)} tracks from **{collection['name']}** to the queue"
+        # Spotify doesn't say how long the playlist really is, so a full
+        # page may mean it was cut short.
+        if len(collection['tracks']) >= SPOTIFY_COLLECTION_LIMIT:
+            message += (
+                f". Only the first {SPOTIFY_COLLECTION_LIMIT} tracks can be read, "
+                f"so any tracks after those weren't added."
+            )
+        await ctx.send(message)
+
+        if idle:
+            await self.play_next(ctx)
 
     @commands.command()
     @commands.cooldown(1, 3, commands.BucketType.user)
@@ -626,22 +800,7 @@ class Music(commands.Cog):
                 self.queue[guild_id] = []
 
             if spotify.is_spotify_reference(query):
-                await ctx.send("🎵 Resolving Spotify track...")
-                spotify_info = await self.handle_spotify_url(query)
-                if not spotify_info:
-                    return await ctx.send(
-                        "❌ I couldn't read this Spotify track. "
-                        "For now, only individual track links are supported."
-                    )
-
-                results = await self.search_youtube(spotify_info)
-                if not results:
-                    return await ctx.send("❌ I couldn't find this Spotify track on YouTube.")
-
-                selected = results[0]
-                if await self.play_or_enqueue(ctx, vc, selected['webpage_url'], selected['title']):
-                    await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
-                return
+                return await self.play_spotify(ctx, vc, query)
 
             if URL_SCHEME_PATTERN.match(query):
                 url = youtube.normalize_url(query)
@@ -764,8 +923,12 @@ class Music(commands.Cog):
             embed.add_field(name="Now Playing", value=self.current_songs[guild_id], inline=False)
         
         # Titles are stored when songs are queued, so listing needs no network.
-        for i, entry in enumerate(self.queue[guild_id], 1):
+        entries = self.queue[guild_id]
+        for i, entry in enumerate(entries[:QUEUE_DISPLAY_LIMIT], 1):
             embed.add_field(name=f"{i}. ", value=entry['title'], inline=False)
+        # Embeds hold at most 25 fields, and a playlist can queue far more.
+        if len(entries) > QUEUE_DISPLAY_LIMIT:
+            embed.set_footer(text=f"…and {len(entries) - QUEUE_DISPLAY_LIMIT} more")
 
         await ctx.send(embed=embed)
 
