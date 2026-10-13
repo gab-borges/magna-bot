@@ -73,6 +73,12 @@ SPOTIFY_MAX_REDIRECTS = 5
 SPOTIFY_TRACK_URL_PREFIX = "https://open.spotify.com/track/"
 NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
+# Stream URLs carry their own expiry; stop reusing them a bit before it.
+STREAM_EXPIRY_MARGIN = 300
+# Downloaded fallback tracks kept on disk; older ones are deleted.
+MAX_DOWNLOADED_TRACKS = 10
+# Finished downloads; yt-dlp's partial and intermediate files are skipped.
+DOWNLOADED_AUDIO_SUFFIXES = {'.mp3', '.m4a', '.webm', '.opus', '.ogg'}
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -86,6 +92,7 @@ class Music(commands.Cog):
         self.search_results = {}
         self.playback_locks = {}
         self.stream_cache = {}  # Cache for successful stream URLs
+        self.downloaded_titles = {}  # video_id -> title of a downloaded track
         self.cache_timeout = 3600  # Cache timeout in seconds (1 hour)
         self.last_voice_close_code = None
         self.last_voice_close_time = 0.0
@@ -97,8 +104,15 @@ class Music(commands.Cog):
         # Create cache directory inside private directory
         self.cache_dir = self.private_dir / 'temp_audio'
         self.cache_dir.mkdir(exist_ok=True)
-        
+        # Downloads from a previous run have no known title; start clean.
+        for leftover in self.cache_dir.iterdir():
+            if leftover.is_file():
+                leftover.unlink(missing_ok=True)
+
+        # A cookies file provided by the operator is only ever read. Cookies
+        # from YOUTUBE_COOKIES are written to a separate, generated file.
         self.cookies_file = Path('youtube_cookies.txt')
+        self.generated_cookies_file = self.private_dir / 'youtube_cookies.txt'
         
         # YT-DLP configuration with more robust settings
         self.ydl_opts = {
@@ -166,13 +180,9 @@ class Music(commands.Cog):
         self.voice_diagnostic_handler = VoiceGatewayDiagnosticHandler(self)
         logging.getLogger('discord.voice_state').addHandler(self.voice_diagnostic_handler)
 
-    def __del__(self):
-        # Clean up temporary cookie file if it exists
-        if self.cookies_file and self.cookies_file.exists():
-            self.cookies_file.unlink()
-
     def cog_unload(self):
         logging.getLogger('discord.voice_state').removeHandler(self.voice_diagnostic_handler)
+        self.generated_cookies_file.unlink(missing_ok=True)
 
     def note_voice_close_code(self, code):
         self.last_voice_close_code = code
@@ -297,6 +307,11 @@ class Music(commands.Cog):
             await self.play_song(ctx, url)
             return None
 
+    def is_resolving_track(self, guild_id):
+        """A track is being looked up for this guild but hasn't started yet."""
+        lock = self.playback_locks.get(guild_id)
+        return lock is not None and lock.locked()
+
     async def extract_info(self, opts, url, *, download=False):
         """Run yt-dlp in a worker thread so slow extractions don't stall the bot."""
         def run():
@@ -318,18 +333,23 @@ class Music(commands.Cog):
             skipped = guild_id in self.skip_requested
             self.skip_requested.discard(guild_id)
 
+            vc = self.voice_clients.get(guild_id)
+            if vc is None or not vc.is_connected():
+                return
+
             # A command may have started another track while we waited.
-            if self.is_player_busy(self.voice_clients.get(guild_id)):
+            if self.is_player_busy(vc):
                 return
 
             if not skipped and self.loop_enabled.get(guild_id) and self.current_urls.get(guild_id):
-                await self.play_song(ctx, self.current_urls[guild_id])
-                return
+                if await self.play_song(ctx, self.current_urls[guild_id]):
+                    return
 
-            if guild_id in self.queue and self.queue[guild_id]:
-                # Get next song from queue
+            # A track that can't be played must not stall the rest of the queue.
+            while self.queue.get(guild_id):
                 entry = self.queue[guild_id].pop(0)
-                await self.play_song(ctx, entry['url'])
+                if await self.play_song(ctx, entry['url']):
+                    return
 
     @staticmethod
     def youtube_video_id(value):
@@ -362,16 +382,34 @@ class Music(commands.Cog):
         video_id = cls.youtube_video_id(value)
         return f"https://www.youtube.com/watch?v={video_id}" if video_id else None
 
+    @staticmethod
+    def stream_url_expiry(stream_url):
+        """Return the Unix time a stream URL stops working, when it says so.
+
+        YouTube's media URLs carry an `expire` parameter; requesting them after
+        that time fails with 403 Forbidden.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(stream_url).query)
+        try:
+            return int(query['expire'][0])
+        except (KeyError, IndexError, ValueError):
+            return None
+
+    def is_cache_entry_fresh(self, cache_data, now):
+        if now - cache_data['timestamp'] >= self.cache_timeout:
+            return False
+        expiry = self.stream_url_expiry(cache_data['url'])
+        return expiry is None or now < expiry - STREAM_EXPIRY_MARGIN
+
     async def get_cached_stream(self, video_id):
-        """Get stream URL from cache if available and not expired"""
-        if video_id in self.stream_cache:
-            cache_data = self.stream_cache[video_id]
-            if time.time() - cache_data['timestamp'] < self.cache_timeout:
-                return cache_data['url']
+        """Return the cached {'url', 'title'} for a video, unless it expired."""
+        cache_data = self.stream_cache.get(video_id)
+        if cache_data and self.is_cache_entry_fresh(cache_data, time.time()):
+            return {'url': cache_data['url'], 'title': cache_data.get('title')}
         return None
 
-    async def cache_stream(self, video_id, stream_url):
-        """Cache stream URL with timestamp"""
+    async def cache_stream(self, video_id, stream_url, title=None):
+        """Cache stream URL and title with timestamp"""
         if not self.is_valid_stream_url(stream_url):
             logger.warning(f"Refusing to cache invalid stream URL for video {video_id}")
             return
@@ -379,13 +417,14 @@ class Music(commands.Cog):
         now = time.time()
         expired = [
             cached_id for cached_id, cache_data in self.stream_cache.items()
-            if now - cache_data['timestamp'] >= self.cache_timeout
+            if not self.is_cache_entry_fresh(cache_data, now)
         ]
         for cached_id in expired:
             del self.stream_cache[cached_id]
 
         self.stream_cache[video_id] = {
             'url': stream_url,
+            'title': title,
             'timestamp': now
         }
 
@@ -427,11 +466,44 @@ class Music(commands.Cog):
     def find_downloaded_audio(self, video_id):
         """Find a downloaded audio file for a video ID regardless of final extension."""
         candidates = sorted(
-            self.cache_dir.glob(f"{video_id}.*"),
+            (
+                path for path in self.cache_dir.glob(f"{video_id}.*")
+                if path.suffix in DOWNLOADED_AUDIO_SUFFIXES
+            ),
             key=lambda path: path.stat().st_mtime,
             reverse=True
         )
         return candidates[0] if candidates else None
+
+    def prune_downloaded_audio(self, keep=MAX_DOWNLOADED_TRACKS):
+        """Delete all but the `keep` most recently downloaded tracks."""
+        files = sorted(
+            (path for path in self.cache_dir.iterdir() if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True
+        )
+        for path in files[keep:]:
+            # ffmpeg keeps reading a file that is still playing after unlink.
+            path.unlink(missing_ok=True)
+            self.downloaded_titles.pop(path.stem, None)
+
+    async def get_downloaded_stream(self, video_id, normalized_url):
+        """Play from a downloaded copy of the track, downloading it if needed."""
+        downloaded_path = self.find_downloaded_audio(video_id)
+        if downloaded_path is None:
+            download_opts = self.ydl_opts.copy()
+            download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
+            info = await self.extract_info(download_opts, normalized_url, download=True)
+            downloaded_path = self.find_downloaded_audio(video_id)
+            if downloaded_path is None:
+                return None
+            self.downloaded_titles[video_id] = (info or {}).get('title')
+            self.prune_downloaded_audio()
+
+        return self.normalize_stream_data({
+            'url': str(downloaded_path),
+            'title': self.downloaded_titles.get(video_id) or "Downloaded Song",
+        }, is_local=True)
 
     async def get_direct_stream(self, video_id):
         """Get stream URL directly from YouTube frontend"""
@@ -655,15 +727,13 @@ class Music(commands.Cog):
             new_cookies = os.getenv('YOUTUBE_COOKIES', '')
             
             if new_cookies:
-                # Update the cookies file with new content
-                if self.cookies_file:
-                    self.cookies_file.write_text(new_cookies)
-                else:
-                    self.cookies_file = self.private_dir / 'temp_cookies.txt'
-                    self.cookies_file.write_text(new_cookies)
-                
+                # Never overwrite the operator's cookies file; write our own,
+                # readable only by the bot.
+                self.generated_cookies_file.touch(mode=0o600, exist_ok=True)
+                self.generated_cookies_file.write_text(new_cookies)
+
                 # Update the ydl_opts with new cookie file
-                self.ydl_opts['cookiefile'] = str(self.cookies_file)
+                self.ydl_opts['cookiefile'] = str(self.generated_cookies_file)
                 self.ydl_opts['cookiesfrombrowser'] = None
                 
                 print("Successfully updated cookies from environment variable")
@@ -677,7 +747,10 @@ class Music(commands.Cog):
             return False
 
     async def play_song(self, ctx, url):
-        """Play a song using multiple fallback methods"""
+        """Play a song using multiple fallback methods.
+
+        Returns True once playback has started.
+        """
         try:
             video_id = self.youtube_video_id(url)
             if not video_id:
@@ -689,11 +762,11 @@ class Music(commands.Cog):
             logger.info(f"Processing YouTube URL: {url}, Video ID: {video_id}")
 
             # Check cache first
-            cached_url = await self.get_cached_stream(video_id)
-            if self.is_valid_stream_url(cached_url):
-                stream_data = {'url': cached_url, 'title': self.current_songs.get(str(ctx.guild.id), 'Cached Song')}
+            cached = await self.get_cached_stream(video_id)
+            if cached and self.is_valid_stream_url(cached['url']):
+                stream_data = {'url': cached['url'], 'title': cached['title'] or 'Unknown Title'}
             else:
-                if cached_url:
+                if cached:
                     logger.warning(f"Dropping invalid cached stream URL for video {video_id}")
                     self.stream_cache.pop(video_id, None)
 
@@ -738,17 +811,7 @@ class Music(commands.Cog):
                                 stream_data = await self.get_ytmusic_stream(video_id)
                             elif method == 5:
                                 # Try downloading as last resort
-                                output_path = self.cache_dir / f"{video_id}.mp3"
-                                if not output_path.exists():
-                                    download_opts = self.ydl_opts.copy()
-                                    download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
-                                    info = await self.extract_info(download_opts, normalized_url, download=True)
-                                    downloaded_path = self.find_downloaded_audio(video_id)
-                                    stream_data = self.normalize_stream_data({
-                                        'url': str(downloaded_path or output_path),
-                                        'title': info.get('title', f"Downloaded Song"),
-                                        'is_local': True
-                                    }, is_local=True)
+                                stream_data = await self.get_downloaded_stream(video_id, normalized_url)
 
                             if stream_data:
                                 break
@@ -767,7 +830,7 @@ class Music(commands.Cog):
 
                 # Cache successful stream URL if it's not a local file
                 if not stream_data.get('is_local', False):
-                    await self.cache_stream(video_id, stream_data['url'])
+                    await self.cache_stream(video_id, stream_data['url'], stream_data['title'])
             
             # Create audio source and play
             try:
@@ -779,34 +842,10 @@ class Music(commands.Cog):
                     await ctx.send("❌ Unable to play this track.")
                     return
 
-                if stream_data.get('is_local', False):
-                    source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
-                else:
-                    try:
-                        source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
-                    except Exception as e:
-                        if "403 Forbidden" in str(e):
-                            await ctx.send("⚠️ Stream expired, retrying...")
-                            try:
-                                output_path = self.cache_dir / f"{video_id}.mp3"
-                                download_opts = self.ydl_opts.copy()
-                                download_opts['outtmpl'] = str(self.cache_dir / f"{video_id}.%(ext)s")
-                                info = await self.extract_info(download_opts, normalized_url, download=True)
-                                downloaded_path = self.find_downloaded_audio(video_id)
-                                local_stream_data = self.normalize_stream_data({
-                                    'url': str(downloaded_path or output_path),
-                                    'title': info.get('title', stream_data['title']),
-                                    'is_local': True
-                                }, is_local=True)
-                                if not local_stream_data:
-                                    raise Exception("Downloaded audio file was not found")
-                                stream_data = local_stream_data
-                                source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
-                            except Exception as dl_err:
-                                logger.error(f"Download after 403 error failed: {str(dl_err)}")
-                                raise Exception("Unable to play this track")
-                        else:
-                            raise Exception("Unable to play this track")
+                # ffmpeg only opens the URL once playback starts, so an expired
+                # stream can't be detected here; get_cached_stream drops
+                # stream URLs before their `expire` time instead.
+                source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
             except Exception as e:
                 logger.error(f"Error creating audio source: {str(e)}")
                 await ctx.send("❌ Unable to play this track.")
@@ -828,10 +867,12 @@ class Music(commands.Cog):
                 color=discord.Color.green()
             )
             await ctx.send(embed=embed)
-            
+            return True
+
         except Exception as e:
             logger.error(f"Play song error: {str(e)}\n{traceback.format_exc()}")
             await ctx.send("❌ An error occurred while trying to play the track.")
+        return False
 
     async def search_youtube(self, query):
         """Search YouTube with multiple fallback methods"""
@@ -1130,7 +1171,11 @@ class Music(commands.Cog):
             # Don't let someone in another channel pull the bot away from
             # people who are still listening.
             current_vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
-            in_use = self.is_player_busy(current_vc) or self.queue.get(guild_id)
+            in_use = (
+                self.is_player_busy(current_vc)
+                or self.queue.get(guild_id)
+                or self.is_resolving_track(guild_id)
+            )
             if in_use and not self.can_control_player(ctx, current_vc):
                 return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
 
@@ -1183,13 +1228,20 @@ class Music(commands.Cog):
 
                 try:
                     entry = await self.play_or_enqueue(ctx, vc, url)
-                    if entry:
-                        info = await self.extract_info(self.ydl_opts, url)
-                        entry['title'] = info.get('title') or entry['title']
-                        await ctx.send(f"🎵 Added to queue: **{entry['title']}**")
                 except Exception as e:
                     logger.error(f"YouTube playback error: {str(e)}")
                     await ctx.send("❌ Unable to play this track.")
+                    return
+
+                if entry:
+                    # The track is already queued; failing to look up its
+                    # title only means the queue shows the URL instead.
+                    try:
+                        info = await self.extract_info(self.ydl_opts, url)
+                        entry['title'] = (info or {}).get('title') or entry['title']
+                    except Exception as e:
+                        logger.warning(f"Could not fetch title for queued {url}: {str(e)}")
+                    await ctx.send(f"🎵 Added to queue: **{entry['title']}**")
             else:
                 await ctx.send("🔍 Searching...")
                 results = await self.search_youtube(query)
