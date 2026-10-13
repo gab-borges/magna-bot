@@ -1,0 +1,289 @@
+"""Tests for the smaller cogs: birthdays, memes, dice, currency, TimeGuessr."""
+import datetime
+import json
+import os
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
+import aiohttp
+from discord.ext import commands
+
+from cogs.birthday import MIDNIGHT, TIMEZONE, Birthday, is_birthday, parse_birthday
+from cogs.coin import CoinConverter
+from cogs.membercount import MemberCount
+from cogs.music import Music
+from cogs.reddit import EMBED_TITLE_LIMIT, Reddit
+from cogs.roll import DiceError, Roll, parse_dice
+from cogs.timeguessr import TimeGuessr
+from tests.test_gemini import Typing
+
+
+def sent_text(ctx):
+    return "\n".join(str(call.args[0]) for call in ctx.send.await_args_list if call.args)
+
+
+class TempDataDirMixin:
+    def use_temp_data_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = patch.dict(os.environ, {'DATA_DIR': tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return tmp.name
+
+
+class BirthdayDateTests(unittest.TestCase):
+    def test_dates_are_stored_zero_padded(self):
+        self.assertEqual(parse_birthday("1-5"), "01-05")
+        self.assertEqual(parse_birthday("25-12"), "25-12")
+
+    def test_accepts_february_29(self):
+        self.assertEqual(parse_birthday("29-02"), "29-02")
+
+    def test_rejects_impossible_dates(self):
+        for text in ("31-02", "32-01", "12/25", "abc"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_birthday(text)
+
+    def test_february_29_is_celebrated_on_the_28th_in_common_years(self):
+        self.assertTrue(is_birthday("29-02", datetime.date(2027, 2, 28)))
+        self.assertFalse(is_birthday("29-02", datetime.date(2028, 2, 28)))
+        self.assertTrue(is_birthday("29-02", datetime.date(2028, 2, 29)))
+
+    def test_check_runs_at_midnight_in_sao_paulo(self):
+        self.assertEqual(Birthday.check_birthdays.time, [MIDNIGHT])
+        self.assertEqual(MIDNIGHT.tzinfo, TIMEZONE)
+
+
+class BirthdayStorageTests(TempDataDirMixin, unittest.TestCase):
+    def setUp(self):
+        self.data_dir = self.use_temp_data_dir()
+
+    def test_saved_birthdays_win_over_the_env_var(self):
+        with open(os.path.join(self.data_dir, 'birthdays.json'), 'w') as f:
+            json.dump({'1': '01-05'}, f)
+
+        with patch.dict(os.environ, {'BIRTHDAYS': '{"2": "02-02"}'}):
+            self.assertEqual(Birthday.load_saved('birthdays.json', 'BIRTHDAYS'), {'1': '01-05'})
+
+    def test_env_var_seeds_the_file_when_nothing_was_saved(self):
+        with patch.dict(os.environ, {'BIRTHDAYS': '{"2": "02-02"}'}):
+            self.assertEqual(Birthday.load_saved('birthdays.json', 'BIRTHDAYS'), {'2': '02-02'})
+
+        with open(os.path.join(self.data_dir, 'birthdays.json')) as f:
+            self.assertEqual(json.load(f), {'2': '02-02'})
+
+
+class BirthdayCommandTests(TempDataDirMixin, unittest.IsolatedAsyncioTestCase):
+    async def test_add_stores_the_normalized_date(self):
+        self.use_temp_data_dir()
+        cog = Birthday.__new__(Birthday)
+        cog.birthdays = {}
+        ctx = SimpleNamespace(send=AsyncMock())
+        member = SimpleNamespace(id=7, mention="@seven")
+
+        await Birthday.add_birthday.callback(cog, ctx, member, "1-5")
+
+        self.assertEqual(cog.birthdays, {'7': '01-05'})
+
+
+class GuildOnlyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_server_commands_refuse_direct_messages(self):
+        for cog_class in (Music, Birthday, MemberCount):
+            with self.subTest(cog=cog_class.__name__):
+                cog = cog_class.__new__(cog_class)
+                with self.assertRaises(commands.NoPrivateMessage):
+                    await cog.cog_check(SimpleNamespace(guild=None))
+                self.assertTrue(await cog.cog_check(SimpleNamespace(guild=object())))
+
+
+class FakeSubreddit:
+    def __init__(self, posts):
+        self.posts = posts
+
+    async def hot(self, limit):
+        for post in self.posts[:limit]:
+            yield post
+
+
+def make_post(title="Meme", url="https://i.redd.it/x.png", author="someone",
+              over_18=False, stickied=False):
+    return SimpleNamespace(
+        title=title, url=url, selftext="", over_18=over_18, stickied=stickied,
+        author=SimpleNamespace(name=author) if author else None,
+    )
+
+
+class MemeTests(unittest.IsolatedAsyncioTestCase):
+    def make_cog(self, posts):
+        cog = Reddit.__new__(Reddit)
+        cog.reddit = SimpleNamespace(subreddit=AsyncMock(return_value=FakeSubreddit(posts)))
+        return cog
+
+    def make_ctx(self, nsfw=False):
+        return SimpleNamespace(
+            send=AsyncMock(),
+            typing=Typing,
+            channel=SimpleNamespace(is_nsfw=lambda: nsfw),
+            author=SimpleNamespace(name="user", display_avatar=SimpleNamespace(url="https://cdn/a.png")),
+        )
+
+    async def meme(self, cog, ctx):
+        await Reddit.meme.callback(cog, ctx)
+        return ctx.send.await_args.kwargs.get('embed')
+
+    async def test_posts_from_deleted_accounts_still_work(self):
+        cog = self.make_cog([make_post(author=None)])
+
+        embed = await self.meme(cog, self.make_ctx())
+
+        self.assertIn("u/[deleted]", embed.footer.text)
+
+    async def test_long_titles_fit_in_the_embed(self):
+        cog = self.make_cog([make_post(title="x" * 300)])
+
+        embed = await self.meme(cog, self.make_ctx())
+
+        self.assertEqual(len(embed.title), EMBED_TITLE_LIMIT)
+
+    async def test_fetches_only_one_subreddit_when_it_has_memes(self):
+        cog = self.make_cog([make_post()])
+
+        await self.meme(cog, self.make_ctx())
+
+        cog.reddit.subreddit.assert_awaited_once()
+
+    async def test_nsfw_posts_stay_out_of_regular_channels(self):
+        cog = self.make_cog([make_post(over_18=True)])
+
+        ctx = self.make_ctx(nsfw=False)
+        embed = await self.meme(cog, ctx)
+
+        self.assertIsNone(embed)
+        self.assertIn("Couldn't find a meme", sent_text(ctx))
+
+    async def test_nsfw_posts_are_allowed_in_nsfw_channels(self):
+        cog = self.make_cog([make_post(over_18=True)])
+
+        embed = await self.meme(cog, self.make_ctx(nsfw=True))
+
+        self.assertIsNotNone(embed)
+
+
+class DiceTests(unittest.TestCase):
+    def test_parses_dice_and_modifiers(self):
+        self.assertEqual(parse_dice("2d20+5"), ([(1, 2, 20)], 5))
+        self.assertEqual(parse_dice("3d6 + 2d4 - 2"), ([(1, 3, 6), (1, 2, 4)], -2))
+
+    def test_negative_modifiers_are_not_ignored(self):
+        self.assertEqual(parse_dice("1d20-2"), ([(1, 1, 20)], -2))
+
+    def test_a_single_die_needs_no_count(self):
+        self.assertEqual(parse_dice("d20"), ([(1, 1, 20)], 0))
+
+    def test_rejects_malformed_expressions(self):
+        for expression in ("2d6abc", "d", "1d20 5", "", "1d0"):
+            with self.subTest(expression=expression), self.assertRaises(DiceError):
+                parse_dice(expression)
+
+    def test_limits_dice_sides_and_terms(self):
+        for expression in ("101d6", "1d101", "+".join(["1d6"] * 21)):
+            with self.subTest(expression=expression[:20]), self.assertRaises(DiceError):
+                parse_dice(expression)
+
+
+class RollCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_total_includes_the_negative_modifier(self):
+        ctx = SimpleNamespace(send=AsyncMock())
+        with patch('cogs.roll.random.randint', return_value=10):
+            await Roll.roll.callback(Roll(bot=None), ctx, dice_expression="1d20-2")
+
+        embed = ctx.send.await_args.kwargs['embed']
+        self.assertEqual(embed.fields[-1].value, "8")
+
+    async def test_invalid_expressions_get_a_friendly_message(self):
+        ctx = SimpleNamespace(send=AsyncMock())
+
+        await Roll.roll.callback(Roll(bot=None), ctx, dice_expression="abc")
+
+        self.assertIn("Invalid dice format", sent_text(ctx))
+
+
+class FakeHTTPSession:
+    def __init__(self, error=None, json_data=None):
+        self.error = error
+        self.json_data = json_data
+        self.urls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def get(self, url, **kwargs):
+        self.urls.append(url)
+        if self.error:
+            raise self.error
+        response = SimpleNamespace(status=200, json=AsyncMock(return_value=self.json_data))
+
+        class Request:
+            async def __aenter__(self_inner):
+                return response
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        return Request()
+
+
+class CoinTests(unittest.IsolatedAsyncioTestCase):
+    async def convert(self, session, *args):
+        ctx = SimpleNamespace(send=AsyncMock())
+        with patch('cogs.coin.aiohttp.ClientSession', return_value=session):
+            await CoinConverter.coin_convert.callback(CoinConverter(bot=None), ctx, *args)
+        return ctx
+
+    async def test_converts_with_the_fetched_rate(self):
+        session = FakeHTTPSession(json_data={'rates': {'USD': 0.2}})
+
+        ctx = await self.convert(session, 5.0, "brl", "usd")
+
+        self.assertIn("**1.00 USD**", ctx.send.await_args.kwargs['embed'].description)
+
+    async def test_network_errors_get_a_friendly_message_without_details(self):
+        session = FakeHTTPSession(error=aiohttp.ClientConnectionError("10.0.0.1 refused"))
+
+        with self.assertLogs('cogs.coin', level='ERROR'):
+            ctx = await self.convert(session, 5.0, "BRL", "USD")
+
+        self.assertIn("isn't responding", sent_text(ctx))
+        self.assertNotIn("10.0.0.1", sent_text(ctx))
+
+    async def test_currency_codes_are_validated_before_any_request(self):
+        session = FakeHTTPSession()
+
+        ctx = await self.convert(session, 5.0, "../x", "USD")
+
+        self.assertEqual(session.urls, [])
+        self.assertIn("isn't a currency code", sent_text(ctx))
+
+
+class TimeGuessrGeocodeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_country_names_are_url_encoded(self):
+        session = FakeHTTPSession(json_data=[{'latlng': [1, 2]}])
+        cog = TimeGuessr(bot=Mock())
+
+        with patch('cogs.timeguessr.aiohttp.ClientSession', return_value=session):
+            self.assertEqual(await cog.geocode_country("Bosnia/Herzegovina?x=1"), (1, 2))
+
+        self.assertEqual(
+            session.urls,
+            ["https://restcountries.com/v3.1/name/Bosnia%2FHerzegovina%3Fx%3D1"],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

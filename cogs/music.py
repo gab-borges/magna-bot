@@ -123,6 +123,12 @@ class Music(commands.Cog):
         self.voice_diagnostic_handler = VoiceGatewayDiagnosticHandler(self)
         logging.getLogger('discord.voice_state').addHandler(self.voice_diagnostic_handler)
 
+    async def cog_check(self, ctx):
+        # Every command here works on a server's state or voice channel.
+        if ctx.guild is None:
+            raise commands.NoPrivateMessage()
+        return True
+
     def cog_unload(self):
         logging.getLogger('discord.voice_state').removeHandler(self.voice_diagnostic_handler)
         self.generated_cookies_file.unlink(missing_ok=True)

@@ -12,6 +12,15 @@ class MemberCount(commands.Cog):
         self.config = self.load_config()
         self.update_channel.start()
 
+    def cog_unload(self):
+        self.update_channel.cancel()
+
+    async def cog_check(self, ctx):
+        # Every command here works on a server's state or voice channel.
+        if ctx.guild is None:
+            raise commands.NoPrivateMessage()
+        return True
+
     # > Config <
     def load_config(self):
         return load_json(data_file('membercount.json'), {})

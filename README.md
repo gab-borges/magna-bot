@@ -40,6 +40,7 @@ pip install -r requirements.txt
 2. Set up environment variables in `.env`:
 - `TOKEN` - Discord Bot Token
 - `GEMINI_API_KEY` - Google Gemini API Key
+- `GEMINI_MODEL` - (optional) Gemini model to use; defaults to `gemini-flash-latest`
 - `REDDIT_CLIENT_ID` - Reddit API Client ID
 - `REDDIT_CLIENT_SECRET` - Reddit API Client Secret
 - `REDDIT_USER_AGENT` - Reddit API User Agent
