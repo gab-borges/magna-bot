@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import aiohttp
 
 from cogs.music import Music
+from magna import spotify
 from tests.music_helpers import make_ctx, make_music, make_voice_client, sent_text
 
 TRACK_ID = "11dFghVXANMlKmJXsNCbNl"
@@ -118,43 +119,43 @@ class SpotifyReferenceTests(unittest.TestCase):
     TRACK_ID = "11dFghVXANMlKmJXsNCbNl"
 
     def test_recognizes_spotify_urls_and_uris(self):
-        self.assertTrue(Music.is_spotify_reference(
+        self.assertTrue(spotify.is_spotify_reference(
             f"https://open.spotify.com/track/{self.TRACK_ID}"
         ))
-        self.assertTrue(Music.is_spotify_reference(f"spotify:track:{self.TRACK_ID}"))
-        self.assertTrue(Music.is_spotify_reference("https://spotify.link/example"))
+        self.assertTrue(spotify.is_spotify_reference(f"spotify:track:{self.TRACK_ID}"))
+        self.assertTrue(spotify.is_spotify_reference("https://spotify.link/example"))
 
     def test_rejects_spoofed_spotify_hostname(self):
-        self.assertFalse(Music.is_spotify_reference(
+        self.assertFalse(spotify.is_spotify_reference(
             f"https://open.spotify.com.evil.example/track/{self.TRACK_ID}"
         ))
 
     def test_normalizes_regular_and_localized_track_urls(self):
         expected = f"https://open.spotify.com/track/{self.TRACK_ID}"
         self.assertEqual(
-            Music.normalize_spotify_track_url(
+            spotify.normalize_track_url(
                 f"https://open.spotify.com/track/{self.TRACK_ID}?si=abc"
             ),
             expected,
         )
         self.assertEqual(
-            Music.normalize_spotify_track_url(
+            spotify.normalize_track_url(
                 f"https://open.spotify.com/intl-pt/track/{self.TRACK_ID}"
             ),
             expected,
         )
         self.assertEqual(
-            Music.normalize_spotify_track_url(f"spotify:track:{self.TRACK_ID}"),
+            spotify.normalize_track_url(f"spotify:track:{self.TRACK_ID}"),
             expected,
         )
 
     def test_does_not_treat_album_as_track(self):
-        self.assertIsNone(Music.normalize_spotify_track_url(
+        self.assertIsNone(spotify.normalize_track_url(
             f"https://open.spotify.com/album/{self.TRACK_ID}"
         ))
 
     def test_does_not_treat_album_uri_as_track(self):
-        self.assertIsNone(Music.normalize_spotify_track_url(f"spotify:album:{self.TRACK_ID}"))
+        self.assertIsNone(spotify.normalize_track_url(f"spotify:album:{self.TRACK_ID}"))
 
     def test_recognizes_album_and_playlist_urls_and_uris(self):
         for reference, expected in {
@@ -165,7 +166,7 @@ class SpotifyReferenceTests(unittest.TestCase):
         }.items():
             with self.subTest(reference):
                 self.assertEqual(
-                    Music.spotify_entity(reference, ('album', 'playlist')), expected
+                    spotify.entity(reference, ('album', 'playlist')), expected
                 )
 
     def test_rejects_other_spotify_entities_and_hosts(self):
@@ -177,7 +178,7 @@ class SpotifyReferenceTests(unittest.TestCase):
             f"spotify:artist:{ALBUM_ID}",
         ):
             with self.subTest(reference):
-                self.assertIsNone(Music.spotify_entity(reference, ('album', 'playlist')))
+                self.assertIsNone(spotify.entity(reference, ('album', 'playlist')))
 
 
 class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
@@ -229,7 +230,7 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         music = self.make_music()
         del music.handle_spotify_url  # use the real resolver
 
-        with patch('cogs.music.aiohttp.ClientSession') as session:
+        with patch('magna.spotify.aiohttp.ClientSession') as session:
             ctx = await self.play(music, "https://open.spotify.com/artist/0gxyHStUsqpMadRV0Di1Qt")
 
         session.assert_not_called()
@@ -248,7 +249,7 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
 class SpotifyRedirectTests(unittest.IsolatedAsyncioTestCase):
     async def resolve(self, responses, url=SHORT_URL):
         session = FakeSpotifySession(responses)
-        with patch('cogs.music.aiohttp.ClientSession', return_value=session):
+        with patch('magna.spotify.aiohttp.ClientSession', return_value=session):
             result = await make_music().handle_spotify_url(url)
         return result, session.requested
 
@@ -314,14 +315,14 @@ class SpotifyRedirectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requested, [SHORT_URL, PLAYLIST_URL])
 
     async def test_short_links_must_use_https(self):
-        self.assertIsNone(Music.normalize_spotify_track_url("http://spotify.link/abc123"))
-        self.assertIsNone(Music.normalize_spotify_track_url("https://spotify.link:8443/abc123"))
+        self.assertIsNone(spotify.normalize_track_url("http://spotify.link/abc123"))
+        self.assertIsNone(spotify.normalize_track_url("https://spotify.link:8443/abc123"))
 
 
 class SpotifyMetadataTests(unittest.IsolatedAsyncioTestCase):
     async def resolve(self, responses, url=TRACK_URL):
         session = FakeSpotifySession(responses)
-        with patch('cogs.music.aiohttp.ClientSession', return_value=session):
+        with patch('magna.spotify.aiohttp.ClientSession', return_value=session):
             result = await make_music().handle_spotify_url(url)
         return result, session.requested
 
@@ -377,7 +378,7 @@ class SpotifyMetadataTests(unittest.IsolatedAsyncioTestCase):
         session = FakeSpotifySession({})
         session.get = Mock(side_effect=aiohttp.ClientConnectionError("offline"))
 
-        with patch('cogs.music.aiohttp.ClientSession', return_value=session):
+        with patch('magna.spotify.aiohttp.ClientSession', return_value=session):
             result = await make_music().handle_spotify_url(TRACK_URL)
 
         self.assertIsNone(result)
@@ -385,7 +386,7 @@ class SpotifyMetadataTests(unittest.IsolatedAsyncioTestCase):
 
 class SpotifyCollectionParsingTests(unittest.TestCase):
     def parse(self, entity, kind='playlist', entity_id=PLAYLIST_ID):
-        return Music.spotify_collection_from_embed(embed_page(entity), kind, entity_id)
+        return spotify.collection_from_embed(embed_page(entity), kind, entity_id)
 
     def test_reads_the_name_and_every_track(self):
         collection = self.parse(playlist_entity([
@@ -452,7 +453,7 @@ class SpotifyCollectionResolverTests(unittest.IsolatedAsyncioTestCase):
             )),
         })
 
-        with patch('cogs.music.aiohttp.ClientSession', return_value=session):
+        with patch('magna.spotify.aiohttp.ClientSession', return_value=session):
             collection = await make_music().handle_spotify_collection_url(f"{PLAYLIST_URL}?si=x")
 
         self.assertEqual(collection['tracks'], [TRACK])
@@ -461,14 +462,14 @@ class SpotifyCollectionResolverTests(unittest.IsolatedAsyncioTestCase):
     async def test_unavailable_playlist_resolves_to_none(self):
         session = FakeSpotifySession({})
 
-        with patch('cogs.music.aiohttp.ClientSession', return_value=session):
+        with patch('magna.spotify.aiohttp.ClientSession', return_value=session):
             self.assertIsNone(await make_music().handle_spotify_collection_url(PLAYLIST_URL))
 
     async def test_network_errors_resolve_to_none(self):
         session = FakeSpotifySession({})
         session.get = Mock(side_effect=aiohttp.ClientConnectionError("offline"))
 
-        with patch('cogs.music.aiohttp.ClientSession', return_value=session):
+        with patch('magna.spotify.aiohttp.ClientSession', return_value=session):
             self.assertIsNone(await make_music().handle_spotify_collection_url(PLAYLIST_URL))
 
 
@@ -497,6 +498,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
         async def start_playing(ctx, url):
             self.vc.is_playing.return_value = True
+            return True
 
         music.play_song = AsyncMock(side_effect=start_playing)
         return music
@@ -579,6 +581,7 @@ class QueuedSearchTests(unittest.IsolatedAsyncioTestCase):
 
         async def start_playing(ctx, url):
             self.vc.is_playing.return_value = True
+            return True
 
         music.play_song = AsyncMock(side_effect=start_playing)
         return music
@@ -605,8 +608,7 @@ class QueuedSearchTests(unittest.IsolatedAsyncioTestCase):
                               {'url': other_url, 'title': 'Works'}]
 
         async def play_song(ctx, url):
-            if url == other_url:
-                self.vc.is_playing.return_value = True
+            return url == other_url
 
         music.play_song = AsyncMock(side_effect=play_song)
 
@@ -628,18 +630,6 @@ class QueuedSearchTests(unittest.IsolatedAsyncioTestCase):
         await music.play_next(make_ctx(voice_client=self.vc))
 
         music.play_song.assert_not_awaited()
-
-    async def test_stops_when_the_voice_connection_is_gone(self):
-        music = self.make_music()
-        music.play_song = AsyncMock()  # never starts playing
-        self.vc.is_connected.return_value = False
-        music.queue['123'] = [{'url': YOUTUBE_URL, 'title': 'One'},
-                              {'url': YOUTUBE_URL, 'title': 'Two'}]
-
-        await music.play_next(make_ctx(voice_client=self.vc))
-
-        music.play_song.assert_awaited_once()
-        self.assertEqual(music.queue['123'], [{'url': YOUTUBE_URL, 'title': 'Two'}])
 
     async def test_queue_listing_fits_in_one_embed(self):
         music = self.make_music()

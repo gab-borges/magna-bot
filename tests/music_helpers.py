@@ -18,6 +18,7 @@ def make_music(**attrs):
     music.skip_requested = set()
     music.search_results = {}
     music.stream_cache = {}
+    music.downloaded_titles = {}
     music.cache_timeout = 3600
     music.cache_dir = Path('.private') / 'temp_audio'
     music.playback_locks = {}

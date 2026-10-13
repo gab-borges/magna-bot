@@ -15,6 +15,7 @@ import unittest
 from types import SimpleNamespace
 
 from cogs.music import Music
+from magna import spotify, youtube
 
 LIVE = os.getenv('MAGNA_LIVE_TESTS') == '1'
 
@@ -102,7 +103,7 @@ class SpotifyLiveTests(unittest.IsolatedAsyncioTestCase):
                 url = await self.music.find_spotify_match(track)
 
                 self.assertIsNotNone(url, f"no reliable match for {track}")
-                self.assertIsNotNone(Music.normalize_youtube_url(url))
+                self.assertIsNotNone(youtube.normalize_url(url))
 
     async def test_youtube_music_finds_official_songs(self):
         candidates = await self.music.ytmusic_candidates("Mr. Brightside The Killers", 'songs')
@@ -117,7 +118,7 @@ class SpotifyLiveTests(unittest.IsolatedAsyncioTestCase):
         self.assert_collection(collection)
         tracks = collection['tracks'][:10]
         missing = [
-            Music.spotify_track_title(track)
+            spotify.track_title(track)
             for track in tracks
             if not await self.music.find_spotify_match(track)
         ]

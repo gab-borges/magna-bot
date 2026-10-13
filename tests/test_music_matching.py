@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-import music_matching
+from magna import matching
 from tests.music_helpers import make_music
 
 BRIGHTSIDE = {'name': 'Mr. Brightside', 'artists': ['The Killers'], 'duration_ms': 222973}
@@ -20,7 +20,7 @@ class MatchingTests(unittest.TestCase):
             ),
         }.items():
             with self.subTest(label):
-                self.assertTrue(music_matching.is_match(BRIGHTSIDE, result))
+                self.assertTrue(matching.is_match(BRIGHTSIDE, result))
 
     def test_rejects_other_recordings_and_songs(self):
         for label, result in {
@@ -32,41 +32,41 @@ class MatchingTests(unittest.TestCase):
             "unknown duration": candidate("Mr. Brightside", "The Killers", None),
         }.items():
             with self.subTest(label):
-                self.assertFalse(music_matching.is_match(BRIGHTSIDE, result))
+                self.assertFalse(matching.is_match(BRIGHTSIDE, result))
 
     def test_keeps_versions_apart(self):
         remix = {'name': 'Despacito - Remix', 'artists': ['Luis Fonsi'], 'duration_ms': 229000}
-        self.assertTrue(music_matching.is_match(
+        self.assertTrue(matching.is_match(
             remix, candidate("Despacito (Remix)", "Luis Fonsi, Daddy Yankee", 229)
         ))
-        self.assertFalse(music_matching.is_match(
+        self.assertFalse(matching.is_match(
             remix, candidate("Despacito", "Luis Fonsi, Daddy Yankee", 229)
         ))
 
     def test_titles_with_live_in_their_name_still_match(self):
         track = {'name': 'Live Forever', 'artists': ['Oasis'], 'duration_ms': 276000}
-        self.assertTrue(music_matching.is_match(track, candidate("Live Forever", "Oasis", 277)))
+        self.assertTrue(matching.is_match(track, candidate("Live Forever", "Oasis", 277)))
 
     def test_ignores_accents_case_punctuation_and_suffixes(self):
         track = {'name': 'Águas de Março - Remastered 2011',
                  'artists': ['Elis Regina', 'Tom Jobim'], 'duration_ms': 213000}
-        self.assertTrue(music_matching.is_match(
+        self.assertTrue(matching.is_match(
             track, candidate("AGUAS DE MARCO", "Elis Regina & Tom Jobim", 214)
         ))
 
     def test_artist_names_with_commas(self):
         track = {'name': 'Who Dat Boy', 'artists': ['Tyler', 'The Creator'], 'duration_ms': 205000}
-        self.assertTrue(music_matching.is_match(
+        self.assertTrue(matching.is_match(
             track, candidate("Who Dat Boy", "Tyler, The Creator", 205)
         ))
 
     def test_unknown_spotify_duration_relies_on_title_and_artist(self):
         track = {**BRIGHTSIDE, 'duration_ms': None}
-        self.assertTrue(music_matching.is_match(track, candidate("Mr. Brightside", "The Killers", 260)))
+        self.assertTrue(matching.is_match(track, candidate("Mr. Brightside", "The Killers", 260)))
 
     def test_artist_is_required(self):
         track = {**BRIGHTSIDE, 'artists': []}
-        self.assertFalse(music_matching.is_match(track, candidate("Mr. Brightside", "The Killers", 223)))
+        self.assertFalse(matching.is_match(track, candidate("Mr. Brightside", "The Killers", 223)))
 
     def test_picks_the_first_match_in_ranking_order(self):
         results = [
@@ -74,8 +74,8 @@ class MatchingTests(unittest.TestCase):
             candidate("Mr. Brightside", "The Killers", 223, "bbbbbbbbbbb"),
             candidate("Mr. Brightside", "The Killers", 222, "ccccccccccc"),
         ]
-        self.assertEqual(music_matching.pick_match(BRIGHTSIDE, results)['video_id'], "bbbbbbbbbbb")
-        self.assertIsNone(music_matching.pick_match(BRIGHTSIDE, results[:1]))
+        self.assertEqual(matching.pick_match(BRIGHTSIDE, results)['video_id'], "bbbbbbbbbbb")
+        self.assertIsNone(matching.pick_match(BRIGHTSIDE, results[:1]))
 
 
 SONG_RESULT = {

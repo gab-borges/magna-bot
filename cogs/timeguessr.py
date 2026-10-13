@@ -3,6 +3,7 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import math
+import urllib.parse
 from collections import defaultdict
 
 # > TimeGuessr Game <
@@ -66,10 +67,6 @@ class TimeGuessr(commands.Cog):
         self.api_url = "https://timeguessr.com/getDaily"
         self.country_cache = {}  # name -> (lat, lng) or None
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"{__name__} is online!")
-
     async def fetch_rounds(self):
         """Fetch daily round data from TimeGuessr API."""
         try:
@@ -91,7 +88,9 @@ class TimeGuessr(commands.Cog):
 
         try:
             async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-                url = f"https://restcountries.com/v3.1/name/{country_name}"
+                # The name comes from chat, so it must not alter the URL path.
+                quoted = urllib.parse.quote(country_name, safe="")
+                url = f"https://restcountries.com/v3.1/name/{quoted}"
                 async with session.get(url) as response:
                     if response.status != 200:
                         self.country_cache[key] = None
