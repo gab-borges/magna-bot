@@ -16,7 +16,8 @@ def make_music(**attrs):
     music.current_urls = {}
     music.loop_enabled = {}
     music.skip_requested = set()
-    music.search_results = {}
+    music.inactivity_timers = {}
+    music.announce_channels = {}
     music.stream_cache = {}
     music.downloaded_tracks = {}
     music.cache_timeout = 3600
@@ -35,6 +36,7 @@ def make_voice_client(*, playing=False, paused=False, channel=None):
     voice_client.is_playing.return_value = playing
     voice_client.is_paused.return_value = paused
     voice_client.is_connected.return_value = True
+    voice_client.disconnect = AsyncMock()
     voice_client.channel = channel
     return voice_client
 

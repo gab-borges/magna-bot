@@ -38,6 +38,8 @@ that, and the bot says so when a playlist reaches it), and each one is looked
 up only when its turn comes.
 Playback controls (and `%play` while music is playing) only work from the bot's
 voice channel, unless the member has the *Move Members* permission.
+The bot leaves the voice channel on its own after 5 minutes with nothing
+playing or queued, or 2 minutes after everyone else has left it.
 
 ## Setup 🚀
 

@@ -50,6 +50,13 @@ STREAM_EXPIRY_MARGIN = 300
 MAX_DOWNLOADED_TRACKS = 10
 # Finished downloads; yt-dlp's partial and intermediate files are skipped.
 DOWNLOADED_AUDIO_SUFFIXES = {'.mp3', '.m4a', '.webm', '.opus', '.ogg'}
+# Seconds before leaving a voice channel where nothing is playing ('idle')
+# or where nobody but bots is left listening ('alone').
+INACTIVITY_DELAYS = {'idle': 300, 'alone': 120}
+INACTIVITY_MESSAGES = {
+    'idle': "👋 Left the voice channel since nothing was playing.",
+    'alone': "👋 Left the voice channel since everyone left.",
+}
 
 def track_details(info):
     """Pull the title, artist and duration out of yt-dlp's video info."""
@@ -85,8 +92,9 @@ class Music(commands.Cog):
         self.loop_enabled = {}
         self.skip_requested = set()
         self.queue = {}
-        self.search_results = {}
         self.playback_locks = {}
+        self.inactivity_timers = {}  # guild_id -> (reason, Task)
+        self.announce_channels = {}  # guild_id -> text channel of the last %play
         self.ytmusic = None  # created on first use
         self.stream_cache = {}  # Cache for successful stream URLs
         self.downloaded_tracks = {}  # video_id -> details of a downloaded track
@@ -165,6 +173,8 @@ class Music(commands.Cog):
     def cog_unload(self):
         logging.getLogger('discord.voice_state').removeHandler(self.voice_diagnostic_handler)
         self.generated_cookies_file.unlink(missing_ok=True)
+        for guild_id in list(self.inactivity_timers):
+            self.cancel_inactivity_timer(guild_id)
 
     def note_voice_close_code(self, code):
         self.last_voice_close_code = code
@@ -214,6 +224,7 @@ class Music(commands.Cog):
         return "❌ Não foi possível entrar no canal de voz."
 
     async def disconnect_voice_client(self, guild_id, guild=None):
+        self.cancel_inactivity_timer(guild_id)
         vc = self.voice_clients.get(guild_id)
         if vc is None and guild is not None:
             vc = guild.voice_client
@@ -228,6 +239,7 @@ class Music(commands.Cog):
             logger.exception("Failed to disconnect stale voice client for guild %s", guild_id)
         finally:
             self.voice_clients.pop(guild_id, None)
+            self.current_songs.pop(guild_id, None)
             self.current_urls.pop(guild_id, None)
             self.loop_enabled.pop(guild_id, None)
             self.skip_requested.discard(guild_id)
@@ -250,7 +262,99 @@ class Music(commands.Cog):
             await vc.move_to(channel)
 
         self.voice_clients[guild_id] = vc
+        self.announce_channels[guild_id] = ctx.channel
+        # Covers joining and then playing nothing, e.g. a cancelled search.
+        self.refresh_inactivity_timer(ctx.guild)
         return vc
+
+    @staticmethod
+    def is_alone(vc):
+        """Whether nobody but bots is left in the bot's voice channel."""
+        members = getattr(vc.channel, 'members', None)
+        if members is None:
+            return False
+        return not any(not member.bot for member in members)
+
+    def inactivity_reason(self, guild):
+        """Why the bot should leave voice ('idle' or 'alone'), or None to stay."""
+        guild_id = str(guild.id)
+        vc = guild.voice_client or self.voice_clients.get(guild_id)
+        if vc is None or not vc.is_connected():
+            return None
+        if self.is_alone(vc):
+            return 'alone'
+        if (
+            self.is_player_busy(vc)
+            or self.queue.get(guild_id)
+            or self.is_resolving_track(guild_id)
+        ):
+            return None
+        return 'idle'
+
+    def cancel_inactivity_timer(self, guild_id):
+        timer = self.inactivity_timers.pop(guild_id, None)
+        if timer is not None:
+            timer[1].cancel()
+
+    def refresh_inactivity_timer(self, guild):
+        """Start, keep or cancel the countdown to leaving voice.
+
+        Called whenever playback or the voice channel changes. A countdown
+        that is still valid keeps running instead of starting over.
+        """
+        guild_id = str(guild.id)
+        reason = self.inactivity_reason(guild)
+        timer = self.inactivity_timers.get(guild_id)
+        if timer is not None and timer[0] == reason:
+            return
+
+        self.cancel_inactivity_timer(guild_id)
+        if reason is not None:
+            task = asyncio.create_task(self.leave_when_inactive(guild, reason))
+            self.inactivity_timers[guild_id] = (reason, task)
+
+    async def leave_when_inactive(self, guild, reason):
+        await asyncio.sleep(INACTIVITY_DELAYS[reason])
+
+        guild_id = str(guild.id)
+        timer = self.inactivity_timers.get(guild_id)
+        if timer is not None and timer[1] is asyncio.current_task():
+            # Leaving cancels the timer; it must not cancel this very task.
+            del self.inactivity_timers[guild_id]
+
+        # Whoever changes the state again (e.g. a track still being looked
+        # up) refreshes the timer, so it's fine to just stop here.
+        reason = self.inactivity_reason(guild)
+        if reason is None:
+            return
+
+        channel = self.announce_channels.pop(guild_id, None)
+        logger.info("Leaving voice in guild %s (%s)", guild_id, reason)
+        await self.leave_voice(guild)
+        if channel is not None:
+            try:
+                await channel.send(INACTIVITY_MESSAGES[reason])
+            except discord.HTTPException:
+                logger.warning("Could not announce leaving voice in guild %s", guild_id)
+
+    async def leave_voice(self, guild):
+        """Clear the guild's player and disconnect from voice."""
+        guild_id = str(guild.id)
+        # Clear first: disconnecting ends the track and fires play_next.
+        self.queue[guild_id] = []
+        self.loop_enabled[guild_id] = False
+        self.current_urls.pop(guild_id, None)
+        await self.disconnect_voice_client(guild_id, guild)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        if before.channel == after.channel:
+            return  # mute, deafen, etc.
+        vc = member.guild.voice_client
+        if vc is None:
+            return
+        if member.id == self.bot.user.id or vc.channel in (before.channel, after.channel):
+            self.refresh_inactivity_timer(member.guild)
 
     @staticmethod
     def is_player_busy(vc):
@@ -277,13 +381,16 @@ class Music(commands.Cog):
         Returns the queue entry when the track was queued, otherwise None.
         """
         guild_id = str(ctx.guild.id)
-        async with self.playback_lock(guild_id):
-            if self.is_player_busy(vc):
-                entry = {'url': url, 'title': title or url}
-                self.queue.setdefault(guild_id, []).append(entry)
-                return entry
-            await self.play_song(ctx, url)
-            return None
+        try:
+            async with self.playback_lock(guild_id):
+                if self.is_player_busy(vc):
+                    entry = {'url': url, 'title': title or url}
+                    self.queue.setdefault(guild_id, []).append(entry)
+                    return entry
+                await self.play_song(ctx, url)
+                return None
+        finally:
+            self.refresh_inactivity_timer(ctx.guild)
 
     def is_resolving_track(self, guild_id):
         """A track is being looked up for this guild but hasn't started yet."""
@@ -306,17 +413,28 @@ class Music(commands.Cog):
         asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
 
     async def play_next(self, ctx):
+        try:
+            await self.start_next_track(ctx)
+        finally:
+            # The queue may have run out, so the bot may now be idle.
+            self.refresh_inactivity_timer(ctx.guild)
+
+    async def start_next_track(self, ctx):
         guild_id = str(ctx.guild.id)
         async with self.playback_lock(guild_id):
             skipped = guild_id in self.skip_requested
             self.skip_requested.discard(guild_id)
 
             vc = self.voice_clients.get(guild_id)
-            if vc is None or not vc.is_connected():
-                return
 
             # A command may have started another track while we waited.
             if self.is_player_busy(vc):
+                return
+
+            # The last track is over; play_song sets this again for the next.
+            self.current_songs.pop(guild_id, None)
+
+            if vc is None or not vc.is_connected():
                 return
 
             if not skipped and self.loop_enabled.get(guild_id) and self.current_urls.get(guild_id):
@@ -876,8 +994,6 @@ class Music(commands.Cog):
                 if not results:
                     return await ctx.send("❌ No results found.")
 
-                self.search_results[ctx.author.id] = results
-
                 embed = discord.Embed(
                     title="🔍 Search Results",
                     description="Type the number (1-10) or 'cancel':",
@@ -905,7 +1021,6 @@ class Music(commands.Cog):
                 try:
                     msg = await self.bot.wait_for('message', check=check, timeout=30.0)
                     if msg.content.lower() == 'cancel':
-                        del self.search_results[ctx.author.id]
                         return await ctx.send("❌ Search cancelled.")
 
                     selected = results[int(msg.content) - 1]
@@ -913,7 +1028,6 @@ class Music(commands.Cog):
                         await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
 
                 except asyncio.TimeoutError:
-                    del self.search_results[ctx.author.id]
                     await ctx.send("❌ Search timed out.")
                 except Exception as e:
                     logger.error(f"Search selection error: {str(e)}")
@@ -1004,11 +1118,7 @@ class Music(commands.Cog):
         if vc:
             if not self.can_control_player(ctx, vc):
                 return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
-            # Clear first: disconnecting ends the track and fires play_next.
-            self.queue[guild_id] = []
-            self.loop_enabled[guild_id] = False
-            self.current_urls.pop(guild_id, None)
-            await self.disconnect_voice_client(guild_id, ctx.guild)
+            await self.leave_voice(ctx.guild)
             await ctx.send("👋 Left the voice channel")
 
     @commands.command()
