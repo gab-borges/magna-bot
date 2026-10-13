@@ -68,6 +68,8 @@ YOUTUBE_HOSTS = {
 YOUTUBE_VIDEO_ID_PATTERN = re.compile(r'[A-Za-z0-9_-]{11}')
 URL_SCHEME_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
 UNSUPPORTED_URL_MESSAGE = "❌ Only YouTube video and Spotify track links are supported."
+SPOTIFY_HOSTS = {'spotify.com', 'spotify.link'}
+SPOTIFY_MAX_REDIRECTS = 5
 NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
@@ -957,6 +959,48 @@ class Music(commands.Cog):
         )
 
     @staticmethod
+    def is_fetchable_spotify_url(url):
+        """Return whether the bot may request this URL while resolving a track."""
+        parsed = urllib.parse.urlparse(url)
+        hostname = (parsed.hostname or '').lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            return False
+        is_spotify_host = (
+            hostname in SPOTIFY_HOSTS
+            or hostname.endswith(('.spotify.com', '.spotify.link'))
+        )
+        return (
+            parsed.scheme == 'https'
+            and port in (None, 443)
+            and not parsed.username
+            and is_spotify_host
+        )
+
+    async def fetch_spotify_page(self, session, url):
+        """GET a Spotify page, following redirects only within Spotify over HTTPS.
+
+        Returns (final_url, html), or None when the page can't be fetched.
+        """
+        for _ in range(SPOTIFY_MAX_REDIRECTS + 1):
+            if not self.is_fetchable_spotify_url(url):
+                logger.warning("Refusing to follow Spotify redirect to %s", url)
+                return None
+
+            async with session.get(url, allow_redirects=False) as response:
+                location = response.headers.get('Location')
+                if response.status in (301, 302, 303, 307, 308) and location:
+                    url = urllib.parse.urljoin(url, location)
+                    continue
+                if response.status != 200:
+                    return None
+                return url, await response.text()
+
+        logger.warning("Too many redirects while resolving Spotify link")
+        return None
+
+    @staticmethod
     def normalize_spotify_track_url(value):
         """Normalize supported Spotify track references to a web URL."""
         value = value.strip()
@@ -967,8 +1011,9 @@ class Music(commands.Cog):
         parsed = urllib.parse.urlparse(value)
         hostname = (parsed.hostname or '').lower()
         if hostname == 'spotify.link' or hostname.endswith('.spotify.link'):
-            # Spotify's oEmbed endpoint follows and understands its short links.
-            return value
+            # Short links are resolved by following their redirects, so only
+            # accept ones that can be fetched safely.
+            return value if Music.is_fetchable_spotify_url(value) else None
 
         if not (
             hostname == 'spotify.com'
@@ -1025,22 +1070,24 @@ class Music(commands.Cog):
                 async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                     # The page title normally includes both track and artist,
                     # which is much more accurate than searching by track ID.
-                    async with session.get(track_url, allow_redirects=True) as response:
-                        if response.status == 200:
-                            resolved_url = self.normalize_spotify_track_url(str(response.url))
-                            if resolved_url:
-                                track_url = resolved_url
-                            page = await response.text()
-                            soup = BeautifulSoup(page, 'html.parser')
-                            page_title = soup.title.string if soup.title else None
-                            search_query = self.spotify_query_from_page_title(page_title)
-                            if search_query:
-                                return search_query
+                    page = await self.fetch_spotify_page(session, track_url)
+                    if page is not None:
+                        final_url, page_html = page
+                        resolved_url = self.normalize_spotify_track_url(final_url)
+                        if resolved_url:
+                            track_url = resolved_url
+                        soup = BeautifulSoup(page_html, 'html.parser')
+                        page_title = soup.title.string if soup.title else None
+                        search_query = self.spotify_query_from_page_title(page_title)
+                        if search_query:
+                            return search_query
 
                     # oEmbed is an official, credential-free metadata endpoint
                     # and a fallback when Spotify changes its HTML title.
                     oembed_url = 'https://open.spotify.com/oembed'
-                    async with session.get(oembed_url, params={'url': track_url}) as response:
+                    async with session.get(
+                        oembed_url, params={'url': track_url}, allow_redirects=False
+                    ) as response:
                         if response.status != 200:
                             return None
 
