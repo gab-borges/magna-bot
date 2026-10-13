@@ -1,16 +1,11 @@
 import discord
 from discord.ext import commands
 import aiohttp
-import json
 
 class CoinConverter(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.api_url = "https://api.exchangerate-api.com/v4/latest/"
-    
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"{__name__} is online!")
     
     @commands.command(name="coin")
     async def coin_convert(self, ctx, amount: float, from_currency: str, to_currency: str):

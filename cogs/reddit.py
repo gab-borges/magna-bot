@@ -15,12 +15,9 @@ class Reddit(commands.Cog):
             user_agent=os.getenv("REDDIT_USER_AGENT")
         )
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"{__name__} is ready!")
-
     # Commands
     @commands.command()
+    @commands.cooldown(1, 10, commands.BucketType.user)
     async def meme(self, ctx: commands.Context):
         # List of subreddits
         subreddits = ["shitposting", "therewasanattempt", "yesyesyesyesno", "WhyWomenLiveLonger"]

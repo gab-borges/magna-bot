@@ -66,10 +66,6 @@ class TimeGuessr(commands.Cog):
         self.api_url = "https://timeguessr.com/getDaily"
         self.country_cache = {}  # name -> (lat, lng) or None
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"{__name__} is online!")
-
     async def fetch_rounds(self):
         """Fetch daily round data from TimeGuessr API."""
         try:

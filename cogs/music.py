@@ -575,6 +575,7 @@ class Music(commands.Cog):
         )
 
     @commands.command()
+    @commands.cooldown(1, 3, commands.BucketType.user)
     async def play(self, ctx, *, query):
         """Play a song by URL (YouTube/Spotify) or search term"""
         try:

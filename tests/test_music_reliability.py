@@ -229,3 +229,40 @@ class ResolvingTrackTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class YouTubeFallbackTests(TempCacheDirMixin, unittest.IsolatedAsyncioTestCase):
+    async def test_search_retries_with_cookies_after_the_bot_check(self):
+        music = make_music()
+        music.update_cookies = AsyncMock(return_value=True)
+        music.extract_info = AsyncMock(side_effect=[
+            RuntimeError("Sign in to confirm you're not a bot"),
+            {'entries': [{'id': VIDEO_ID, 'title': 'Song', 'url': VIDEO_URL}]},
+        ])
+
+        results = await music.search_youtube("song")
+
+        music.update_cookies.assert_awaited_once()
+        self.assertEqual([r['webpage_url'] for r in results], [VIDEO_URL])
+
+    async def test_search_failure_returns_no_results(self):
+        music = make_music()
+        music.extract_info = AsyncMock(side_effect=RuntimeError("offline"))
+
+        self.assertEqual(await music.search_youtube("song"), [])
+
+    async def test_playback_falls_back_to_downloading_the_track(self):
+        music = make_music(cache_dir=self.make_cache_dir())
+        vc = make_voice_client()
+        music.voice_clients['123'] = vc
+        music.extract_info = AsyncMock(side_effect=RuntimeError("yt-dlp failed"))
+        downloaded = music.cache_dir / f"{VIDEO_ID}.mp3"
+        downloaded.write_bytes(b"audio")
+        music.downloaded_titles[VIDEO_ID] = 'Downloaded song'
+
+        with patch('cogs.music.discord.FFmpegOpusAudio') as audio:
+            self.assertTrue(await music.play_song(make_ctx(voice_client=vc), VIDEO_URL))
+
+        audio.assert_called_once()
+        self.assertEqual(audio.call_args.args[0], str(downloaded))
+        vc.play.assert_called_once()
