@@ -33,8 +33,9 @@ and looks for the same recording on YouTube Music (official songs first, then
 videos) and then YouTube. A result is only played when its title, one of its
 artists and its duration (within a few seconds) match the track; otherwise the
 track is skipped with a message, rather than playing a guess. Albums and
-playlists queue up to 100 tracks, and each one is looked up only when its turn
-comes.
+playlists queue up to 100 tracks (Spotify's embed page lists no more than
+that, and the bot says so when a playlist reaches it), and each one is looked
+up only when its turn comes.
 Playback controls (and `%play` while music is playing) only work from the bot's
 voice channel, unless the member has the *Move Members* permission.
 

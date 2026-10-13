@@ -40,6 +40,7 @@ UNSUPPORTED_URL_MESSAGE = (
     "❌ Only YouTube video links and Spotify track, album and playlist links are supported."
 )
 # Each queued Spotify track costs a YouTube lookup when its turn comes.
+# Spotify's embed pages list at most 100 tracks anyway, without the total.
 SPOTIFY_COLLECTION_LIMIT = 100
 QUEUE_DISPLAY_LIMIT = 20
 NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
@@ -741,8 +742,13 @@ class Music(commands.Cog):
             idle = not self.is_player_busy(vc)
 
         message = f"🎵 Added {len(entries)} tracks from **{collection['name']}** to the queue"
-        if len(collection['tracks']) > len(tracks):
-            message += f" (only the first {SPOTIFY_COLLECTION_LIMIT})"
+        # Spotify doesn't say how long the playlist really is, so a full
+        # page may mean it was cut short.
+        if len(collection['tracks']) >= SPOTIFY_COLLECTION_LIMIT:
+            message += (
+                f". Only the first {SPOTIFY_COLLECTION_LIMIT} tracks can be read, "
+                f"so any tracks after those weren't added."
+            )
         await ctx.send(message)
 
         if idle:

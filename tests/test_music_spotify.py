@@ -538,7 +538,18 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
         ctx = await self.play(music)
 
         self.assertEqual(len(music.queue['123']), 100)
-        self.assertIn("(only the first 100)", sent_text(ctx))
+        self.assertIn("Only the first 100 tracks can be read", sent_text(ctx))
+
+    async def test_a_full_page_warns_that_the_playlist_may_be_cut(self):
+        # Spotify's embed page stops at 100 tracks, so 100 may mean "more".
+        for count, warned in ((100, True), (99, False)):
+            with self.subTest(count=count):
+                music = self.make_music(playing=True, tracks=collection(count))
+
+                ctx = await self.play(music)
+
+                self.assertIn(f"Added {count} tracks", sent_text(ctx))
+                self.assertEqual("Only the first 100 tracks can be read" in sent_text(ctx), warned)
 
     async def test_unreadable_playlist_reports_an_error(self):
         music = self.make_music()
