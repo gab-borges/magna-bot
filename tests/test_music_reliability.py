@@ -118,11 +118,11 @@ class CachedStreamTests(unittest.IsolatedAsyncioTestCase):
         music = make_music()
         later = int(time.time()) + 6 * 3600
         url = f'https://media.example/audio?expire={later}&id=1'
-        await music.cache_stream(VIDEO_ID, url, 'Song')
+        await music.cache_stream(VIDEO_ID, url, 'Song', 'Artist', 245)
 
         self.assertEqual(
             await music.get_cached_stream(VIDEO_ID),
-            {'url': url, 'title': 'Song'},
+            {'url': url, 'title': 'Song', 'artist': 'Artist', 'duration': 245},
         )
 
 
@@ -133,7 +133,7 @@ class DownloadedAudioTests(TempCacheDirMixin, unittest.IsolatedAsyncioTestCase):
     async def test_reuses_an_existing_download(self):
         existing = self.music.cache_dir / f"{VIDEO_ID}.mp3"
         existing.write_bytes(b"audio")
-        self.music.downloaded_titles[VIDEO_ID] = 'Downloaded song'
+        self.music.downloaded_tracks[VIDEO_ID] = {'title': 'Downloaded song'}
         self.music.extract_info = AsyncMock()
 
         stream = await self.music.get_downloaded_stream(VIDEO_ID, VIDEO_URL)
@@ -258,7 +258,7 @@ class YouTubeFallbackTests(TempCacheDirMixin, unittest.IsolatedAsyncioTestCase):
         music.extract_info = AsyncMock(side_effect=RuntimeError("yt-dlp failed"))
         downloaded = music.cache_dir / f"{VIDEO_ID}.mp3"
         downloaded.write_bytes(b"audio")
-        music.downloaded_titles[VIDEO_ID] = 'Downloaded song'
+        music.downloaded_tracks[VIDEO_ID] = {'title': 'Downloaded song'}
 
         with patch('cogs.music.discord.FFmpegOpusAudio') as audio:
             self.assertTrue(await music.play_song(make_ctx(voice_client=vc), VIDEO_URL))
@@ -266,3 +266,13 @@ class YouTubeFallbackTests(TempCacheDirMixin, unittest.IsolatedAsyncioTestCase):
         audio.assert_called_once()
         self.assertEqual(audio.call_args.args[0], str(downloaded))
         vc.play.assert_called_once()
+
+
+class TrackDetailsTests(unittest.TestCase):
+    def test_reads_artist_and_duration(self):
+        from cogs.music import track_details, format_duration
+        details = track_details({'title': 'Song', 'uploader': 'Band - Topic', 'duration': 245})
+        self.assertEqual(details, {'title': 'Song', 'artist': 'Band', 'duration': 245})
+        self.assertEqual(format_duration(245), '4:05')
+        self.assertEqual(format_duration(3725), '1:02:05')
+        self.assertIsNone(format_duration(None))

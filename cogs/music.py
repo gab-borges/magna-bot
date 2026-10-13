@@ -51,6 +51,31 @@ MAX_DOWNLOADED_TRACKS = 10
 # Finished downloads; yt-dlp's partial and intermediate files are skipped.
 DOWNLOADED_AUDIO_SUFFIXES = {'.mp3', '.m4a', '.webm', '.opus', '.ogg'}
 
+def track_details(info):
+    """Pull the title, artist and duration out of yt-dlp's video info."""
+    info = info or {}
+    artist = info.get('artist') or info.get('creator') or info.get('uploader') or info.get('channel')
+    if artist and artist.endswith(' - Topic'):
+        # YouTube Music's auto-generated artist channels.
+        artist = artist[:-len(' - Topic')]
+    return {
+        'title': info.get('track') or info.get('title') or 'Unknown Title',
+        'artist': artist,
+        'duration': info.get('duration'),
+    }
+
+
+def format_duration(seconds):
+    """Format seconds as m:ss or h:mm:ss; None when unknown."""
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return None
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
 class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -64,7 +89,7 @@ class Music(commands.Cog):
         self.playback_locks = {}
         self.ytmusic = None  # created on first use
         self.stream_cache = {}  # Cache for successful stream URLs
-        self.downloaded_titles = {}  # video_id -> title of a downloaded track
+        self.downloaded_tracks = {}  # video_id -> details of a downloaded track
         self.cache_timeout = 3600  # Cache timeout in seconds (1 hour)
         self.last_voice_close_code = None
         self.last_voice_close_time = 0.0
@@ -326,11 +351,16 @@ class Music(commands.Cog):
         """Return the cached {'url', 'title'} for a video, unless it expired."""
         cache_data = self.stream_cache.get(video_id)
         if cache_data and self.is_cache_entry_fresh(cache_data, time.time()):
-            return {'url': cache_data['url'], 'title': cache_data.get('title')}
+            return {
+                'url': cache_data['url'],
+                'title': cache_data.get('title'),
+                'artist': cache_data.get('artist'),
+                'duration': cache_data.get('duration'),
+            }
         return None
 
-    async def cache_stream(self, video_id, stream_url, title=None):
-        """Cache stream URL and title with timestamp"""
+    async def cache_stream(self, video_id, stream_url, title=None, artist=None, duration=None):
+        """Cache stream URL and track details with timestamp"""
         if not self.is_valid_stream_url(stream_url):
             logger.warning(f"Refusing to cache invalid stream URL for video {video_id}")
             return
@@ -346,6 +376,8 @@ class Music(commands.Cog):
         self.stream_cache[video_id] = {
             'url': stream_url,
             'title': title,
+            'artist': artist,
+            'duration': duration,
             'timestamp': now
         }
 
@@ -406,7 +438,7 @@ class Music(commands.Cog):
         for path in files[keep:]:
             # ffmpeg keeps reading a file that is still playing after unlink.
             path.unlink(missing_ok=True)
-            self.downloaded_titles.pop(path.stem, None)
+            self.downloaded_tracks.pop(path.stem, None)
 
     async def get_downloaded_stream(self, video_id, normalized_url):
         """Play from a downloaded copy of the track, downloading it if needed."""
@@ -418,12 +450,14 @@ class Music(commands.Cog):
             downloaded_path = self.find_downloaded_audio(video_id)
             if downloaded_path is None:
                 return None
-            self.downloaded_titles[video_id] = (info or {}).get('title')
+            self.downloaded_tracks[video_id] = track_details(info)
             self.prune_downloaded_audio()
 
+        details = self.downloaded_tracks.get(video_id) or {}
         return self.normalize_stream_data({
+            **details,
             'url': str(downloaded_path),
-            'title': self.downloaded_titles.get(video_id) or "Downloaded Song",
+            'title': details.get('title') or "Downloaded Song",
         }, is_local=True)
 
     async def update_cookies(self):
@@ -485,7 +519,7 @@ class Music(commands.Cog):
             # Check cache first
             cached = await self.get_cached_stream(video_id)
             if cached and self.is_valid_stream_url(cached['url']):
-                stream_data = {'url': cached['url'], 'title': cached['title'] or 'Unknown Title'}
+                stream_data = {**cached, 'title': cached['title'] or 'Unknown Title'}
             else:
                 if cached:
                     logger.warning(f"Dropping invalid cached stream URL for video {video_id}")
@@ -498,8 +532,8 @@ class Music(commands.Cog):
                     info = await self.extract_with_cookie_retry(lambda: self.ydl_opts, normalized_url)
                     if info and info.get('url'):
                         stream_data = self.normalize_stream_data({
+                            **track_details(info),
                             'url': info['url'],
-                            'title': info.get('title', 'Unknown Title')
                         })
                 except Exception as e:
                     logger.error(f"yt-dlp error: {str(e)}")
@@ -520,7 +554,10 @@ class Music(commands.Cog):
 
                 # Cache successful stream URL if it's not a local file
                 if not stream_data.get('is_local', False):
-                    await self.cache_stream(video_id, stream_data['url'], stream_data['title'])
+                    await self.cache_stream(
+                        video_id, stream_data['url'], stream_data['title'],
+                        stream_data.get('artist'), stream_data.get('duration')
+                    )
             
             # Create audio source and play
             try:
@@ -556,6 +593,11 @@ class Music(commands.Cog):
                 description=f"**{stream_data['title']}**",
                 color=discord.Color.green()
             )
+            if stream_data.get('artist'):
+                embed.add_field(name="Artist", value=stream_data['artist'], inline=True)
+            duration = format_duration(stream_data.get('duration'))
+            if duration:
+                embed.add_field(name="Duration", value=duration, inline=True)
             await ctx.send(embed=embed)
             return True
 
