@@ -53,9 +53,10 @@ class Reddit(commands.Cog):
         return memes
 
     # Commands
-    @commands.command()
+    @commands.hybrid_command()
     @commands.cooldown(1, 10, commands.BucketType.user)
     async def meme(self, ctx: commands.Context):
+        """Post a random meme from Reddit"""
         if self.reddit is None:
             return await ctx.send("⚠️ Memes aren't configured (missing Reddit API credentials).")
 

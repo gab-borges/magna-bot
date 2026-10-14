@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import re
 import random
@@ -51,7 +52,8 @@ class Roll(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command()
+    @commands.hybrid_command()
+    @app_commands.describe(dice_expression="Dice to roll, like 2d20+5 or 3d6+2d4-2")
     async def roll(self, ctx, *, dice_expression: str):
         """Roll dice using the format XdY+Z
         Example: %roll 2d20+5 (rolls 2 d20 dice and adds 5)

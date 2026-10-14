@@ -1,6 +1,8 @@
 import logging
 import os
 
+import discord
+from discord import app_commands
 from discord.ext import commands
 from google import genai
 from google.genai import errors, types
@@ -12,6 +14,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "gemini-flash-latest"
 REQUEST_TIMEOUT_MS = 30_000
 DISCORD_MESSAGE_LIMIT = 2000
+# How much of a slash command's question is repeated above the answer.
+QUOTE_LIMIT = 300
 
 PERSONA = """
 You, Gemini, are Magna Shanoa. Roleplay him.
@@ -32,6 +36,13 @@ def split_message(text, limit=DISCORD_MESSAGE_LIMIT):
     if text:
         chunks.append(text)
     return chunks
+
+
+def quote(text, limit=QUOTE_LIMIT):
+    """Format text as a Discord block quote, shortened to `limit` characters."""
+    if len(text) > limit:
+        text = text[:limit - 1] + "…"
+    return "\n".join(f"> {line}" for line in text.splitlines())
 
 
 # > Commands that use the Gemini API <
@@ -56,9 +67,11 @@ class Gemini(commands.Cog):
         )
 
     # Commands
-    @commands.command()
+    @commands.hybrid_command()
+    @app_commands.describe(question="What you want to ask Magna")
     @commands.cooldown(1, 15, commands.BucketType.user)
     async def ask(self, ctx: commands.Context, *, question: str):
+        """Ask Magna Shanoa anything"""
         if self.client is None:
             return await ctx.send("⚠️ Magna's AI isn't configured (missing GEMINI_API_KEY).")
 
@@ -81,8 +94,13 @@ class Gemini(commands.Cog):
         if not text:
             return await ctx.send("No response generated")
 
+        # A slash command's reply doesn't show what was asked, so quote it.
+        if ctx.interaction is not None:
+            text = f"{quote(question)}\n\n{text}"
+
+        # Neither the question nor the answer should make the bot ping anyone.
         for chunk in split_message(text):
-            await ctx.send(chunk)
+            await ctx.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot):

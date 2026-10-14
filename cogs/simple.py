@@ -7,16 +7,19 @@ class Simple(commands.Cog):
         self.bot = bot
 
     # Commands
-    @commands.command(aliases=["hi", "howdy", "hey"])
+    @commands.hybrid_command(aliases=["hi", "howdy", "hey"])
     async def hello(self, ctx):
+        """Say hello to Magna"""
         await ctx.send(f"Hello there, {ctx.author.mention}!")
 
-    @commands.command(name="morning")
+    @commands.hybrid_command(name="morning")
     async def goodmorning(self, ctx):
+        """Wish everyone a good morning"""
         await ctx.send(f"Good morning, {ctx.author.mention}!")
     
-    @commands.command(name="ping")
+    @commands.hybrid_command(name="ping")
     async def ping(self, ctx):
+        """Show the bot's latency"""
         await ctx.send(f":ping_pong:  {self.bot.user.name}'s Latency: {round(self.bot.latency * 1000)}ms")
 
     '''

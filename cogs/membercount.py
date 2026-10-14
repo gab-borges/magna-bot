@@ -1,7 +1,9 @@
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 import logging
 
+from magna.slash import defer
 from magna.storage import data_file, load_json, save_json
 
 logger = logging.getLogger(__name__)
@@ -62,20 +64,28 @@ class MemberCount(commands.Cog):
             self.save_config()
 
     # > Commands <
-    @commands.command()
+    @commands.hybrid_command()
+    @app_commands.describe(channel="Voice channel whose name will show the member count")
+    @app_commands.default_permissions(administrator=True)
+    @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def setmembercount(self, ctx, channel: discord.VoiceChannel):
         """Define the channel that will show the member count"""
         self.config[str(ctx.guild.id)] = str(channel.id)
         self.save_config()
         
+        # Renaming a channel can wait on Discord's rate limit.
+        await defer(ctx)
+
         # Immediate update
         count = ctx.guild.member_count
         await channel.edit(name=f"👥 Membros: {count}")
         
         await ctx.send(f"Channel {channel.mention} configured to show the member count!")
 
-    @commands.command()
+    @commands.hybrid_command()
+    @app_commands.default_permissions(administrator=True)
+    @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def stopmembercount(self, ctx):
         """Stop updating the member count"""

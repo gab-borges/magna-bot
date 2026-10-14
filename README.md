@@ -17,6 +17,32 @@ A Discord bot built with Python and discord.py that combines fun interactions wi
   - Playback controls (`%pause`, `%stop`, `%skip`)
   - Voice channel management (`%leave`)
 
+## Slash Commands ⚡
+
+Every command works both with the `%` prefix and as a Discord slash command:
+`%play never gonna give you up` and `/play` do the same thing. Slash commands
+show a description of each argument while typing, and some suggest values:
+
+- `/play` suggests songs from YouTube Music as you type; picking one plays
+  that exact song. Typing a link or any other text works as with `%play`.
+- `/coin` suggests common currency codes.
+
+Error messages of slash commands are only shown to whoever ran the command,
+and server-only commands (music, birthdays, member count) don't show up in
+DMs. `/setmembercount` and `/stopmembercount` only show up for administrators.
+Prefix aliases (`%hi`, `%tg`, `%tgparar`) only work with `%`. `/birthday`
+works through subcommands (`/birthday add`, `/birthday list`, …), and
+`/birthday help` stands in for a bare `%birthday`.
+
+The bot registers its slash commands with Discord when it starts, but only
+when they changed since the last start (Discord rate-limits this); what was
+last registered is kept in `app_commands.json` in the data directory. The bot's
+owner can force a new registration with `%sync`. To show up in a server, the
+bot must have been invited with the `applications.commands` scope (together
+with `bot`); bots invited before may need to be invited again with the new
+scope. A new command can take a moment to show up, and Discord's client may
+need a restart (Ctrl+R) to show changes right away.
+
 ## Music Commands 🎵
 
 - `%play [url/search/spotify]`: Play music from YouTube URL, Spotify URL, or search term
@@ -190,5 +216,6 @@ printf '%s' "$DOCKERHUB_TOKEN" | podman login docker.io -u gabborges --password-
 ```
 
 O `.env` e os cookies não são copiados para a imagem. `birthdays.json`,
-`birthday_channels.json`, `birthday_state.json` e `membercount.json` ficam no diretório `data`, portanto
-continuam existindo quando o container for recriado.
+`birthday_channels.json`, `birthday_state.json`, `membercount.json` e
+`app_commands.json` ficam no diretório `data`, portanto continuam existindo
+quando o container for recriado.

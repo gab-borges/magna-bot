@@ -32,7 +32,8 @@ class ErrorHandler(commands.Cog):
 
         message = self.describe(ctx, error)
         if message:
-            await ctx.send(message)
+            # Only the person who ran a slash command sees why it failed.
+            await ctx.send(message, ephemeral=True)
 
     def describe(self, ctx, error):
         """Return the message to show for `error`, or None to stay silent."""
