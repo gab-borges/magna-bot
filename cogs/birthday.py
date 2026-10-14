@@ -81,32 +81,61 @@ class Birthday(commands.Cog):
     def save_channels(self):
         save_json(data_file('birthday_channels.json'), self.channels)
 
+    def load_last_announced(self):
+        return load_json(data_file('birthday_state.json'), {}).get('last_announced')
+
+    def save_last_announced(self, day):
+        save_json(data_file('birthday_state.json'), {'last_announced': day.isoformat()})
+
     @tasks.loop(time=MIDNIGHT)  # Every day at midnight, São Paulo time
     async def check_birthdays(self):
-        try:
-            today = datetime.datetime.now(TIMEZONE).date()
-
-            for user_id, birthday in self.birthdays.items():
-                if is_birthday(birthday, today):
-                    for guild in self.bot.guilds:
-                        member = guild.get_member(int(user_id))
-                        if member:
-                            embed = discord.Embed(
-                                title="🎉 Feliz Aniversário! 🎂",
-                                description=f"Hoje é aniversário de {member.mention}!\nParabéns! 🎈🎊",
-                                color=discord.Color.gold()
-                            )
-                            channel_id = self.channels.get(str(guild.id))
-                            channel = guild.get_channel(int(channel_id)) if channel_id else guild.system_channel
-                            if channel:
-                                await channel.send(embed=embed)
-                                
-        except Exception:
-            logger.exception("Error in check_birthdays")
+        await self.announce_today()
 
     @check_birthdays.before_loop
     async def before_check(self):
         await self.bot.wait_until_ready()
+        # Catch up when the bot was down (or restarting) at midnight.
+        await self.announce_today()
+
+    async def announce_today(self):
+        """Announce today's birthdays, unless that was already done today."""
+        # An exception here would stop the daily loop for good.
+        try:
+            today = datetime.datetime.now(TIMEZONE).date()
+            if self.load_last_announced() == today.isoformat():
+                return
+            await self.announce_birthdays(today)
+            self.save_last_announced(today)
+        except Exception:
+            logger.exception("Error announcing birthdays")
+
+    async def announce_birthdays(self, today):
+        for user_id, birthday in self.birthdays.items():
+            if not is_birthday(birthday, today):
+                continue
+            for guild in self.bot.guilds:
+                member = guild.get_member(int(user_id))
+                if not member:
+                    continue
+                # One failing channel (missing permission, deleted channel)
+                # must not stop the other announcements.
+                try:
+                    await self.announce(guild, member)
+                except Exception:
+                    logger.exception(
+                        "Could not announce the birthday of %s in guild %s", user_id, guild.id
+                    )
+
+    async def announce(self, guild, member):
+        embed = discord.Embed(
+            title="🎉 Feliz Aniversário! 🎂",
+            description=f"Hoje é aniversário de {member.mention}!\nParabéns! 🎈🎊",
+            color=discord.Color.gold()
+        )
+        channel_id = self.channels.get(str(guild.id))
+        channel = guild.get_channel(int(channel_id)) if channel_id else guild.system_channel
+        if channel:
+            await channel.send(embed=embed)
 
     @commands.group(invoke_without_command=True)
     async def birthday(self, ctx):

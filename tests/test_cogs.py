@@ -99,6 +99,59 @@ class BirthdayCommandTests(TempDataDirMixin, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cog.birthdays, {'7': '01-05'})
 
 
+class BirthdayAnnouncementTests(TempDataDirMixin, unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.use_temp_data_dir()
+
+    def make_cog(self, guilds):
+        cog = Birthday.__new__(Birthday)
+        cog.bot = SimpleNamespace(guilds=guilds)
+        cog.birthdays = {'7': '12-06'}
+        cog.channels = {}
+        return cog
+
+    def make_guild(self, guild_id, channel):
+        member = SimpleNamespace(mention="@seven")
+        return SimpleNamespace(
+            id=guild_id, get_member=lambda user_id: member, system_channel=channel
+        )
+
+    async def announce_on(self, cog, day):
+        now = datetime.datetime.combine(day, datetime.time(0, 5), TIMEZONE)
+        with patch('cogs.birthday.datetime.datetime') as fake_datetime:
+            fake_datetime.now.return_value = now
+            await cog.announce_today()
+
+    async def test_a_failing_channel_does_not_stop_other_announcements(self):
+        broken = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("Forbidden")))
+        working = SimpleNamespace(send=AsyncMock())
+        cog = self.make_cog([self.make_guild(1, broken), self.make_guild(2, working)])
+
+        with self.assertLogs('cogs.birthday', 'ERROR'):
+            await self.announce_on(cog, datetime.date(2027, 6, 12))
+
+        working.send.assert_awaited_once()
+
+    async def test_announces_only_once_per_day(self):
+        channel = SimpleNamespace(send=AsyncMock())
+        cog = self.make_cog([self.make_guild(1, channel)])
+
+        # Midnight run, then a restart later the same day.
+        await self.announce_on(cog, datetime.date(2027, 6, 12))
+        await self.announce_on(cog, datetime.date(2027, 6, 12))
+
+        channel.send.assert_awaited_once()
+
+    async def test_a_restart_announces_birthdays_missed_at_midnight(self):
+        channel = SimpleNamespace(send=AsyncMock())
+        cog = self.make_cog([self.make_guild(1, channel)])
+        await self.announce_on(cog, datetime.date(2027, 6, 11))
+
+        await self.announce_on(cog, datetime.date(2027, 6, 12))
+
+        channel.send.assert_awaited_once()
+
+
 class BirthdayListTests(unittest.IsolatedAsyncioTestCase):
     async def list_embed(self, birthdays, today):
         cog = Birthday.__new__(Birthday)
