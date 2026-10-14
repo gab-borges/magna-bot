@@ -2,9 +2,12 @@ import discord
 from discord.ext import commands
 import aiohttp
 import asyncio
+import logging
 import math
 import urllib.parse
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 # > TimeGuessr Game <
 
@@ -81,33 +84,46 @@ class TimeGuessr(commands.Cog):
             return None
 
     async def geocode_country(self, country_name):
-        """Get (lat, lng) for a country name via restcountries API. Cached."""
+        """Get (lat, lng) for a country name via restcountries API. Cached.
+
+        An exact name match comes first, so "Niger" isn't taken for "Nigeria";
+        a partial match is the fallback. Only definite answers are cached: a
+        timeout or server error just scores this guess 0.
+        """
         key = country_name.lower()
         if key in self.country_cache:
             return self.country_cache[key]
 
+        # The name comes from chat, so it must not alter the URL path.
+        quoted = urllib.parse.quote(country_name, safe="")
+        url = f"https://restcountries.com/v3.1/name/{quoted}"
         try:
             async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-                # The name comes from chat, so it must not alter the URL path.
-                quoted = urllib.parse.quote(country_name, safe="")
-                url = f"https://restcountries.com/v3.1/name/{quoted}"
-                async with session.get(url) as response:
-                    if response.status != 200:
-                        self.country_cache[key] = None
-                        return None
-                    data = await response.json()
-                    if not data or not isinstance(data, list):
-                        self.country_cache[key] = None
-                        return None
-                    latlng = data[0].get("latlng")
-                    if latlng and len(latlng) >= 2:
-                        result = (latlng[0], latlng[1])
-                        self.country_cache[key] = result
-                        return result
-        except Exception:
-            pass
+                result = await self.fetch_latlng(session, f"{url}?fullText=true")
+                if result is None:
+                    result = await self.fetch_latlng(session, url)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            logger.warning("Could not geocode %r", country_name, exc_info=True)
+            return None
 
-        self.country_cache[key] = None
+        self.country_cache[key] = result
+        return result
+
+    @staticmethod
+    async def fetch_latlng(session, url):
+        """(lat, lng) of the first country found, or None when there's none.
+
+        Raises aiohttp.ClientError for answers other than found / not found.
+        """
+        async with session.get(url) as response:
+            if response.status == 404:
+                return None
+            response.raise_for_status()
+            data = await response.json()
+        if data and isinstance(data, list):
+            latlng = data[0].get("latlng")
+            if latlng and len(latlng) >= 2:
+                return (latlng[0], latlng[1])
         return None
 
     @commands.command(name="timeguessr", aliases=["tg"])
