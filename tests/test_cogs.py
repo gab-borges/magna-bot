@@ -183,6 +183,33 @@ class BirthdayListTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.footer.text, "…and 3 more")
 
 
+class MemberCountTests(TempDataDirMixin, unittest.IsolatedAsyncioTestCase):
+    def make_cog(self, guilds):
+        self.use_temp_data_dir()
+        cog = MemberCount.__new__(MemberCount)
+        cog.bot = SimpleNamespace(get_guild=guilds.get)
+        cog.config = {'1': '10', '2': '20'}
+        return cog
+
+    async def test_guilds_the_bot_left_are_skipped_quietly(self):
+        channel = SimpleNamespace(name="old", edit=AsyncMock())
+        guild = SimpleNamespace(member_count=5, get_channel=lambda channel_id: channel)
+        cog = self.make_cog({2: guild})
+
+        with self.assertNoLogs('cogs.membercount', 'ERROR'):
+            await MemberCount.update_channel.coro(cog)
+
+        channel.edit.assert_awaited_once_with(name="👥 Membros: 5")
+
+    async def test_leaving_a_guild_forgets_its_channel(self):
+        cog = self.make_cog({})
+
+        await cog.on_guild_remove(SimpleNamespace(id=1))
+
+        self.assertEqual(cog.config, {'2': '20'})
+        self.assertEqual(cog.load_config(), {'2': '20'})
+
+
 class GuildOnlyTests(unittest.IsolatedAsyncioTestCase):
     async def test_server_commands_refuse_direct_messages(self):
         for cog_class in (Music, Birthday, MemberCount):
