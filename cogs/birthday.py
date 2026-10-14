@@ -28,6 +28,17 @@ def is_birthday(birthday, day):
         return True
     return birthday == '29-02' and today == '28-02' and not calendar.isleap(day.year)
 
+def days_until(birthday, today):
+    """Days from `today` to the next time `birthday` is celebrated (0 = today)."""
+    for offset in range(367):
+        if is_birthday(birthday, today + datetime.timedelta(days=offset)):
+            return offset
+    raise ValueError(f"Not a birthday: {birthday}")
+
+
+# Discord rejects embeds with more fields than this.
+EMBED_FIELD_LIMIT = 25
+
 class Birthday(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -138,11 +149,18 @@ class Birthday(commands.Cog):
             return
 
         embed = discord.Embed(title="🎂 Birthday List", color=discord.Color.blue())
-        
-        for user_id, date in self.birthdays.items():
-            member = ctx.guild.get_member(int(user_id))
-            if member:
-                embed.add_field(name=member.display_name, value=date, inline=True)
+
+        # Upcoming birthdays first, starting with today's.
+        today = datetime.datetime.now(TIMEZONE).date()
+        upcoming = sorted(self.birthdays.items(), key=lambda item: days_until(item[1], today))
+        members = [
+            (member, date) for user_id, date in upcoming
+            if (member := ctx.guild.get_member(int(user_id)))
+        ]
+        for member, date in members[:EMBED_FIELD_LIMIT]:
+            embed.add_field(name=member.display_name, value=date, inline=True)
+        if len(members) > EMBED_FIELD_LIMIT:
+            embed.set_footer(text=f"…and {len(members) - EMBED_FIELD_LIMIT} more")
 
         await ctx.send(embed=embed)
 

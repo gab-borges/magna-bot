@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, Mock, patch
 import aiohttp
 from discord.ext import commands
 
-from cogs.birthday import MIDNIGHT, TIMEZONE, Birthday, is_birthday, parse_birthday
+from cogs.birthday import (
+    EMBED_FIELD_LIMIT, MIDNIGHT, TIMEZONE, Birthday, days_until, is_birthday, parse_birthday,
+)
 from cogs.coin import CoinConverter
 from cogs.membercount import MemberCount
 from cogs.music import Music
@@ -52,6 +54,14 @@ class BirthdayDateTests(unittest.TestCase):
         self.assertFalse(is_birthday("29-02", datetime.date(2028, 2, 28)))
         self.assertTrue(is_birthday("29-02", datetime.date(2028, 2, 29)))
 
+    def test_days_until_the_next_birthday(self):
+        today = datetime.date(2027, 12, 30)
+        self.assertEqual(days_until("30-12", today), 0)
+        self.assertEqual(days_until("31-12", today), 1)
+        self.assertEqual(days_until("29-12", today), 365)  # 2028 has 366 days
+        # 2028 is a leap year, so 29-02 isn't moved to the 28th.
+        self.assertEqual(days_until("29-02", today), 61)
+
     def test_check_runs_at_midnight_in_sao_paulo(self):
         self.assertEqual(Birthday.check_birthdays.time, [MIDNIGHT])
         self.assertEqual(MIDNIGHT.tzinfo, TIMEZONE)
@@ -87,6 +97,36 @@ class BirthdayCommandTests(TempDataDirMixin, unittest.IsolatedAsyncioTestCase):
         await Birthday.add_birthday.callback(cog, ctx, member, "1-5")
 
         self.assertEqual(cog.birthdays, {'7': '01-05'})
+
+
+class BirthdayListTests(unittest.IsolatedAsyncioTestCase):
+    async def list_embed(self, birthdays, today):
+        cog = Birthday.__new__(Birthday)
+        cog.birthdays = birthdays
+        guild = SimpleNamespace(
+            get_member=lambda user_id: SimpleNamespace(display_name=f"user{user_id}")
+        )
+        ctx = SimpleNamespace(guild=guild, send=AsyncMock())
+        now = datetime.datetime.combine(today, datetime.time(12), TIMEZONE)
+        with patch('cogs.birthday.datetime.datetime') as fake_datetime:
+            fake_datetime.now.return_value = now
+            fake_datetime.strptime = datetime.datetime.strptime
+            await Birthday.list_birthdays.callback(cog, ctx)
+        return ctx.send.await_args.kwargs['embed']
+
+    async def test_upcoming_birthdays_come_first(self):
+        embed = await self.list_embed(
+            {'1': '01-01', '2': '15-06', '3': '10-06', '4': '01-12'}, datetime.date(2027, 6, 12)
+        )
+
+        self.assertEqual([f.name for f in embed.fields], ["user2", "user4", "user1", "user3"])
+
+    async def test_list_fits_in_one_embed(self):
+        birthdays = {str(i): '01-01' for i in range(EMBED_FIELD_LIMIT + 3)}
+        embed = await self.list_embed(birthdays, datetime.date(2027, 6, 12))
+
+        self.assertEqual(len(embed.fields), EMBED_FIELD_LIMIT)
+        self.assertEqual(embed.footer.text, "…and 3 more")
 
 
 class GuildOnlyTests(unittest.IsolatedAsyncioTestCase):
