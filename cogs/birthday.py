@@ -140,9 +140,13 @@ class Birthday(commands.Cog):
     @commands.group(invoke_without_command=True)
     async def birthday(self, ctx):
         """Birthday commands"""
-        await ctx.send("Use `%birthday add <dd-mm>` to add your birthday\n"
-                      "Use `%birthday remove` to remove your birthday\n"
-                      "Use `%birthday list` to see all birthdays")
+        prefix = ctx.clean_prefix
+        await ctx.send(f"`{prefix}birthday list` shows everyone's birthday\n"
+                       "Admins only:\n"
+                       f"`{prefix}birthday add <member> <dd-mm>` sets a member's birthday\n"
+                       f"`{prefix}birthday remove <member>` removes it\n"
+                       f"`{prefix}birthday setchannel [channel]` picks where birthdays are announced\n"
+                       f"`{prefix}birthday removechannel` goes back to the server's system channel")
 
     # > Commands <  
     @commands.has_permissions(administrator=True)

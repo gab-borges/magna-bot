@@ -100,6 +100,16 @@ class BirthdayCommandTests(TempDataDirMixin, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cog.birthdays, {'7': '01-05'})
 
 
+class BirthdayHelpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_help_shows_how_the_subcommands_are_really_used(self):
+        ctx = SimpleNamespace(clean_prefix="%", send=AsyncMock())
+
+        await Birthday.birthday.callback(Birthday.__new__(Birthday), ctx)
+
+        self.assertIn("%birthday add <member> <dd-mm>", sent_text(ctx))
+        self.assertIn("%birthday remove <member>", sent_text(ctx))
+
+
 class BirthdayAnnouncementTests(TempDataDirMixin, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.use_temp_data_dir()
