@@ -216,5 +216,6 @@ printf '%s' "$DOCKERHUB_TOKEN" | podman login docker.io -u gabborges --password-
 ```
 
 O `.env` e os cookies não são copiados para a imagem. `birthdays.json`,
-`birthday_channels.json`, `membercount.json` e `app_commands.json` ficam no
-diretório `data`, portanto continuam existindo quando o container for recriado.
+`birthday_channels.json`, `birthday_state.json`, `membercount.json` e
+`app_commands.json` ficam no diretório `data`, portanto continuam existindo
+quando o container for recriado.

@@ -29,6 +29,17 @@ def is_birthday(birthday, day):
         return True
     return birthday == '29-02' and today == '28-02' and not calendar.isleap(day.year)
 
+def days_until(birthday, today):
+    """Days from `today` to the next time `birthday` is celebrated (0 = today)."""
+    for offset in range(367):
+        if is_birthday(birthday, today + datetime.timedelta(days=offset)):
+            return offset
+    raise ValueError(f"Not a birthday: {birthday}")
+
+
+# Discord rejects embeds with more fields than this.
+EMBED_FIELD_LIMIT = 25
+
 class Birthday(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -71,42 +82,74 @@ class Birthday(commands.Cog):
     def save_channels(self):
         save_json(data_file('birthday_channels.json'), self.channels)
 
+    def load_last_announced(self):
+        return load_json(data_file('birthday_state.json'), {}).get('last_announced')
+
+    def save_last_announced(self, day):
+        save_json(data_file('birthday_state.json'), {'last_announced': day.isoformat()})
+
     @tasks.loop(time=MIDNIGHT)  # Every day at midnight, São Paulo time
     async def check_birthdays(self):
-        try:
-            today = datetime.datetime.now(TIMEZONE).date()
-
-            for user_id, birthday in self.birthdays.items():
-                if is_birthday(birthday, today):
-                    for guild in self.bot.guilds:
-                        member = guild.get_member(int(user_id))
-                        if member:
-                            embed = discord.Embed(
-                                title="🎉 Feliz Aniversário! 🎂",
-                                description=f"Hoje é aniversário de {member.mention}!\nParabéns! 🎈🎊",
-                                color=discord.Color.gold()
-                            )
-                            channel_id = self.channels.get(str(guild.id))
-                            channel = guild.get_channel(int(channel_id)) if channel_id else guild.system_channel
-                            if channel:
-                                await channel.send(embed=embed)
-                                
-        except Exception:
-            logger.exception("Error in check_birthdays")
+        await self.announce_today()
 
     @check_birthdays.before_loop
     async def before_check(self):
         await self.bot.wait_until_ready()
+        # Catch up when the bot was down (or restarting) at midnight.
+        await self.announce_today()
+
+    async def announce_today(self):
+        """Announce today's birthdays, unless that was already done today."""
+        # An exception here would stop the daily loop for good.
+        try:
+            today = datetime.datetime.now(TIMEZONE).date()
+            if self.load_last_announced() == today.isoformat():
+                return
+            await self.announce_birthdays(today)
+            self.save_last_announced(today)
+        except Exception:
+            logger.exception("Error announcing birthdays")
+
+    async def announce_birthdays(self, today):
+        for user_id, birthday in self.birthdays.items():
+            if not is_birthday(birthday, today):
+                continue
+            for guild in self.bot.guilds:
+                member = guild.get_member(int(user_id))
+                if not member:
+                    continue
+                # One failing channel (missing permission, deleted channel)
+                # must not stop the other announcements.
+                try:
+                    await self.announce(guild, member)
+                except Exception:
+                    logger.exception(
+                        "Could not announce the birthday of %s in guild %s", user_id, guild.id
+                    )
+
+    async def announce(self, guild, member):
+        embed = discord.Embed(
+            title="🎉 Feliz Aniversário! 🎂",
+            description=f"Hoje é aniversário de {member.mention}!\nParabéns! 🎈🎊",
+            color=discord.Color.gold()
+        )
+        channel_id = self.channels.get(str(guild.id))
+        channel = guild.get_channel(int(channel_id)) if channel_id else guild.system_channel
+        if channel:
+            await channel.send(embed=embed)
 
     # Slash command groups can't run on their own, so this is /birthday help.
     @commands.hybrid_group(invoke_without_command=True, fallback="help")
     @commands.guild_only()
     async def birthday(self, ctx):
         """Birthday commands"""
-        await ctx.send("Use `%birthday add <member> <dd-mm>` to add a member's birthday\n"
-                      "Use `%birthday remove <member>` to remove a member's birthday\n"
-                      "Use `%birthday list` to see all birthdays\n"
-                      "(they also work as `/birthday` commands)")
+        prefix = ctx.clean_prefix
+        await ctx.send(f"`{prefix}birthday list` shows everyone's birthday\n"
+                       "Admins only:\n"
+                       f"`{prefix}birthday add <member> <dd-mm>` sets a member's birthday\n"
+                       f"`{prefix}birthday remove <member>` removes it\n"
+                       f"`{prefix}birthday setchannel [channel]` picks where birthdays are announced\n"
+                       f"`{prefix}birthday removechannel` goes back to the server's system channel")
 
     # > Commands <  
     @commands.has_permissions(administrator=True)
@@ -144,11 +187,18 @@ class Birthday(commands.Cog):
             return
 
         embed = discord.Embed(title="🎂 Birthday List", color=discord.Color.blue())
-        
-        for user_id, date in self.birthdays.items():
-            member = ctx.guild.get_member(int(user_id))
-            if member:
-                embed.add_field(name=member.display_name, value=date, inline=True)
+
+        # Upcoming birthdays first, starting with today's.
+        today = datetime.datetime.now(TIMEZONE).date()
+        upcoming = sorted(self.birthdays.items(), key=lambda item: days_until(item[1], today))
+        members = [
+            (member, date) for user_id, date in upcoming
+            if (member := ctx.guild.get_member(int(user_id)))
+        ]
+        for member, date in members[:EMBED_FIELD_LIMIT]:
+            embed.add_field(name=member.display_name, value=date, inline=True)
+        if len(members) > EMBED_FIELD_LIMIT:
+            embed.set_footer(text=f"…and {len(members) - EMBED_FIELD_LIMIT} more")
 
         await ctx.send(embed=embed)
 

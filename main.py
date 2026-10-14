@@ -28,7 +28,13 @@ class MagnaBot(commands.Bot):
 
 
 # Bot creation: Prefix Definition and Intents (to specify the events the bot will listen to)
-bot = MagnaBot(command_prefix="%", intents=discord.Intents.all())
+# Text from outside (Gemini answers, video titles) goes into messages, so it
+# must never be able to ping @everyone, @here or a role.
+bot = MagnaBot(
+    command_prefix="%",
+    intents=discord.Intents.all(),
+    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False),
+)
 
 # Rich Presence
 @bot.event
