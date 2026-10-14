@@ -125,10 +125,51 @@ podman logs -f magna-bot
 podman stop magna-bot
 podman start magna-bot
 
-# Atualização depois que uma nova imagem for publicada:
+# Atualização manual depois que uma nova imagem for publicada:
 podman pull docker.io/gabborges/magna-bot:latest
 podman rm -f magna-bot
 # Execute novamente o comando "podman run" acima.
+```
+
+`podman start`/`restart` reaproveitam o container existente, com a imagem e o
+`.env` da época em que ele foi criado. Para usar uma imagem nova ou um `.env`
+alterado, o container precisa ser recriado.
+
+### Atualização automática
+
+O `podman auto-update` depende de systemd, então em sistemas com OpenRC a
+atualização é feita por um script no cron. Ele baixa a `latest` e só recria o
+container quando a imagem mudou. Neste exemplo o container é gerenciado por um
+`compose.yaml` com `podman-compose`:
+
+```sh
+#!/bin/sh
+# /usr/local/bin/magna-bot-update
+set -eu
+DIR=/caminho/para/magna-bot   # diretório com compose.yaml e .env
+IMAGE=docker.io/gabborges/magna-bot:latest
+
+podman pull -q "$IMAGE" >/dev/null
+new=$(podman image inspect --format "{{.Id}}" "$IMAGE")
+cur=$(podman inspect --format "{{.Image}}" magna-bot 2>/dev/null || echo none)
+[ "$new" = "$cur" ] && exit 0
+
+cd "$DIR"
+podman-compose up -d --force-recreate
+podman image prune -f >/dev/null
+echo "$(date "+%F %T") updated to $new"
+```
+
+Crontab do root (verifica a cada 10 minutos; a saída vai para um arquivo de log):
+
+```
+*/10 * * * * flock -n /run/magna-bot-update.lock /usr/local/bin/magna-bot-update >> /var/log/magna-bot-update.log 2>&1
+```
+
+Para o container voltar depois de um reboot no OpenRC:
+
+```bash
+rc-update add podman-restart default
 ```
 
 Se o repositório do Docker Hub estiver privado, autentique o Podman antes do
