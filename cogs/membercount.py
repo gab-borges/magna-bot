@@ -31,11 +31,12 @@ class MemberCount(commands.Cog):
     # > Tasks <
     @tasks.loop(minutes=30)
     async def update_channel(self):
-        for guild_id, channel_id in self.config.items():
+        # Copied: the listener below may remove a guild while this awaits.
+        for guild_id, channel_id in list(self.config.items()):
             try:
                 guild = self.bot.get_guild(int(guild_id))
-                channel = guild.get_channel(int(channel_id))
-                
+                channel = guild and guild.get_channel(int(channel_id))
+
                 if not channel:
                     continue
                 
@@ -53,6 +54,12 @@ class MemberCount(commands.Cog):
     @update_channel.before_loop
     async def before_update(self):
         await self.bot.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_guild_remove(self, guild):
+        # The bot left or was removed; there's no channel to update anymore.
+        if self.config.pop(str(guild.id), None) is not None:
+            self.save_config()
 
     # > Commands <
     @commands.command()
