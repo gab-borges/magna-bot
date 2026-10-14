@@ -9,10 +9,11 @@ from pathlib import Path
 
 import discord
 import yt_dlp
-from discord.ext import commands
+from discord.ext import commands, tasks
 from ytmusicapi import YTMusic
 
 from magna import matching, spotify, youtube
+from magna.storage import data_file
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,11 @@ DOWNLOADED_AUDIO_SUFFIXES = {'.mp3', '.m4a', '.webm', '.opus', '.ogg'}
 # Seconds before leaving a voice channel where nothing is playing ('idle')
 # or where nobody but bots is left listening ('alone').
 INACTIVITY_DELAYS = {'idle': 300, 'alone': 120}
+# Touched every VOICE_ACTIVITY_INTERVAL seconds while the bot is in a voice
+# channel, so the server's update script can hold off recreating the
+# container mid-song. It goes stale on its own if the bot dies.
+VOICE_ACTIVITY_FILE = 'voice_active'
+VOICE_ACTIVITY_INTERVAL = 60
 INACTIVITY_MESSAGES = {
     'idle': "👋 Left the voice channel since nothing was playing.",
     'alone': "👋 Left the voice channel since everyone left.",
@@ -170,11 +176,30 @@ class Music(commands.Cog):
             raise commands.NoPrivateMessage()
         return True
 
+    async def cog_load(self):
+        self.voice_activity_heartbeat.start()
+
     def cog_unload(self):
+        self.voice_activity_heartbeat.cancel()
         logging.getLogger('discord.voice_state').removeHandler(self.voice_diagnostic_handler)
         self.generated_cookies_file.unlink(missing_ok=True)
         for guild_id in list(self.inactivity_timers):
             self.cancel_inactivity_timer(guild_id)
+
+    def mark_voice_activity(self):
+        """Touch the voice activity file while connected to voice, else remove it."""
+        path = Path(data_file(VOICE_ACTIVITY_FILE))
+        try:
+            if any(vc.is_connected() for vc in self.bot.voice_clients):
+                path.touch()
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Could not update %s", path)
+
+    @tasks.loop(seconds=VOICE_ACTIVITY_INTERVAL)
+    async def voice_activity_heartbeat(self):
+        self.mark_voice_activity()
 
     def note_voice_close_code(self, code):
         self.last_voice_close_code = code
@@ -263,6 +288,8 @@ class Music(commands.Cog):
 
         self.voice_clients[guild_id] = vc
         self.announce_channels[guild_id] = ctx.channel
+        # Don't wait for the next heartbeat to tell the server we're busy.
+        self.mark_voice_activity()
         # Covers joining and then playing nothing, e.g. a cancelled search.
         self.refresh_inactivity_timer(ctx.guild)
         return vc

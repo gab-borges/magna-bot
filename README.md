@@ -139,7 +139,9 @@ alterado, o container precisa ser recriado.
 
 O `podman auto-update` depende de systemd, então em sistemas com OpenRC a
 atualização é feita por um script no cron. Ele baixa a `latest` e só recria o
-container quando a imagem mudou. Neste exemplo o container é gerenciado por um
+container quando a imagem mudou. Enquanto o bot está num canal de voz ele
+mantém o arquivo `data/voice_active` atualizado, e o script adia a atualização
+para não cortar a música. Neste exemplo o container é gerenciado por um
 `compose.yaml` com `podman-compose`:
 
 ```sh
@@ -148,11 +150,19 @@ container quando a imagem mudou. Neste exemplo o container é gerenciado por um
 set -eu
 DIR=/caminho/para/magna-bot   # diretório com compose.yaml e .env
 IMAGE=docker.io/gabborges/magna-bot:latest
+# O bot atualiza este arquivo a cada minuto enquanto está num canal de voz.
+FLAG=$DIR/data/voice_active
 
 podman pull -q "$IMAGE" >/dev/null
 new=$(podman image inspect --format "{{.Id}}" "$IMAGE")
 cur=$(podman inspect --format "{{.Image}}" magna-bot 2>/dev/null || echo none)
 [ "$new" = "$cur" ] && exit 0
+
+# Não interrompe música: tenta de novo na próxima execução. Um arquivo
+# com mais de 3 minutos (bot caiu) é ignorado.
+if [ -f "$FLAG" ] && [ $(( $(date +%s) - $(stat -c %Y "$FLAG") )) -lt 180 ]; then
+    exit 0
+fi
 
 cd "$DIR"
 podman-compose up -d --force-recreate

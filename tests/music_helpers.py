@@ -8,7 +8,7 @@ from cogs.music import Music
 def make_music(**attrs):
     """Build a Music cog without running __init__ side effects."""
     music = Music.__new__(Music)
-    music.bot = SimpleNamespace(loop=None, wait_for=AsyncMock())
+    music.bot = SimpleNamespace(loop=None, wait_for=AsyncMock(), voice_clients=[])
     music.cookies_file = None
     music.queue = {}
     music.voice_clients = {}

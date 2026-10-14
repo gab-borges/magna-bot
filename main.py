@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import signal
 
 import discord
 from discord.ext import commands
@@ -35,6 +36,12 @@ async def load():
 
 async def main():
     async with bot:
+        # Python running as PID 1 in the container ignores SIGTERM unless it is
+        # handled, so `podman stop` would wait and then kill the bot. Closing
+        # the bot leaves voice channels and makes bot.start() return.
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGTERM, lambda: asyncio.create_task(bot.close())
+        )
         await load()
         await bot.start(os.getenv("TOKEN"))
 
