@@ -34,7 +34,7 @@ class ErrorHandlerTests(unittest.IsolatedAsyncioTestCase):
             commands.CommandOnCooldown(cooldown, 4.2, commands.BucketType.user)
         )
 
-        ctx.send.assert_awaited_once_with("⏳ Calma! Tente de novo em 5s.")
+        ctx.send.assert_awaited_once_with("⏳ Calma! Tente de novo em 5s.", ephemeral=True)
 
     async def test_missing_argument_shows_usage(self):
         param = Music.play.clean_params['query']

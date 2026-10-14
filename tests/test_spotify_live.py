@@ -11,10 +11,11 @@ your own playlists (how many tracks are read, and how many of the first ten
 find a YouTube match, is printed).
 """
 import os
+import time
 import unittest
 from types import SimpleNamespace
 
-from cogs.music import Music
+from cogs.music import AUTOCOMPLETE_TIMEOUT, Music
 from magna import spotify, youtube
 
 LIVE = os.getenv('MAGNA_LIVE_TESTS') == '1'
@@ -110,6 +111,18 @@ class SpotifyLiveTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(candidates)
         self.assertTrue(all(candidate['duration'] for candidate in candidates))
+
+    async def test_play_suggestions_arrive_within_discords_deadline(self):
+        # Discord drops autocomplete answers after 3 seconds.
+        await self.music.ytmusic_candidates("warm up", 'songs')  # first search signs in
+        started = time.monotonic()
+        choices = await self.music.play_autocomplete(None, "mr brightside")
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(choices, f"no suggestions after {elapsed:.1f}s")
+        self.assertLess(elapsed, AUTOCOMPLETE_TIMEOUT)
+        self.assertIn("Mr. Brightside", choices[0].name)
+        self.assertTrue(youtube.video_id(choices[0].value))
 
     @unittest.skipUnless(os.getenv('SPOTIFY_PLAYLIST_URL'), "set SPOTIFY_PLAYLIST_URL to check a playlist")
     async def test_matches_given_playlist(self):

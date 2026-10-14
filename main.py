@@ -7,6 +7,8 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from magna.slash import sync_commands
+
 # Load .env
 load_dotenv('.env')
 
@@ -15,8 +17,18 @@ load_dotenv('.env')
 discord.utils.setup_logging(level=logging.INFO)
 logger = logging.getLogger('magna')
 
+class MagnaBot(commands.Bot):
+    async def setup_hook(self):
+        # Runs after login, once the cogs (and so the slash commands) are loaded.
+        try:
+            await sync_commands(self)
+        except discord.HTTPException:
+            # %commands still work; slash commands keep their last synced version.
+            logger.exception("Could not sync slash commands")
+
+
 # Bot creation: Prefix Definition and Intents (to specify the events the bot will listen to)
-bot = commands.Bot(command_prefix="%", intents=discord.Intents.all())
+bot = MagnaBot(command_prefix="%", intents=discord.Intents.all())
 
 # Rich Presence
 @bot.event

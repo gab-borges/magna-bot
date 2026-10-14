@@ -1,3 +1,4 @@
+import collections
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -24,6 +25,7 @@ def make_music(**attrs):
     music.cache_dir = Path('.private') / 'temp_audio'
     music.playback_locks = {}
     music.ytmusic = None
+    music.suggestions = collections.OrderedDict()
     music.ydl_opts = {'http_headers': {'User-Agent': 'test'}}
     music.FFMPEG_OPTIONS = {}
     for name, value in attrs.items():

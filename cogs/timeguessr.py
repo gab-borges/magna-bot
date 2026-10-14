@@ -1,10 +1,13 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import aiohttp
 import asyncio
 import math
 import urllib.parse
 from collections import defaultdict
+
+from magna.slash import defer
 
 # > TimeGuessr Game <
 
@@ -110,7 +113,10 @@ class TimeGuessr(commands.Cog):
         self.country_cache[key] = None
         return None
 
-    @commands.command(name="timeguessr", aliases=["tg"])
+    @commands.hybrid_command(name="timeguessr", aliases=["tg"])
+    @app_commands.describe(
+        tempo=f"Segundos por rodada, de {min_round_time} a {max_round_time} (padrão: 30)"
+    )
     async def timeguessr(self, ctx, tempo: int = 30):
         """
         Start a TimeGuessr game!
@@ -135,6 +141,7 @@ class TimeGuessr(commands.Cog):
         self.active_games[ctx.channel.id] = game
 
         try:
+            await defer(ctx)
             rounds = await self.fetch_rounds()
             if not rounds:
                 await ctx.send("❌ Não consegui buscar os dados do TimeGuessr. Tente novamente mais tarde.")
@@ -191,7 +198,7 @@ class TimeGuessr(commands.Cog):
             if self.active_games.get(ctx.channel.id) is game:
                 del self.active_games[ctx.channel.id]
 
-    @commands.command(name="tgstop", aliases=["tgparar"])
+    @commands.hybrid_command(name="tgstop", aliases=["tgparar"])
     async def timeguessr_stop(self, ctx):
         """Encerra o jogo de TimeGuessr deste canal (quem começou ou moderadores)."""
         game = self.active_games.get(ctx.channel.id)

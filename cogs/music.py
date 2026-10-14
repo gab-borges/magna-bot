@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import logging
 import os
 import re
@@ -9,10 +10,12 @@ from pathlib import Path
 
 import discord
 import yt_dlp
+from discord import app_commands
 from discord.ext import commands, tasks
 from ytmusicapi import YTMusic
 
 from magna import matching, spotify, youtube
+from magna.slash import defer
 from magna.storage import data_file
 
 logger = logging.getLogger(__name__)
@@ -44,6 +47,13 @@ UNSUPPORTED_URL_MESSAGE = (
 # Spotify's embed pages list at most 100 tracks anyway, without the total.
 SPOTIFY_COLLECTION_LIMIT = 100
 QUEUE_DISPLAY_LIMIT = 20
+# /play suggestions: Discord drops the request after 3 seconds, shows at most
+# 25 choices and allows 100 characters per choice.
+AUTOCOMPLETE_TIMEOUT = 2.5
+AUTOCOMPLETE_MIN_LENGTH = 2
+AUTOCOMPLETE_CHOICES = 10
+AUTOCOMPLETE_CACHE_SIZE = 128
+CHOICE_NAME_LIMIT = 100
 NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
 # Stream URLs carry their own expiry; stop reusing them a bit before it.
 STREAM_EXPIRY_MARGIN = 300
@@ -102,6 +112,7 @@ class Music(commands.Cog):
         self.inactivity_timers = {}  # guild_id -> (reason, Task)
         self.announce_channels = {}  # guild_id -> text channel of the last %play
         self.ytmusic = None  # created on first use
+        self.suggestions = collections.OrderedDict()  # query -> Task, for /play
         self.stream_cache = {}  # Cache for successful stream URLs
         self.downloaded_tracks = {}  # video_id -> details of a downloaded track
         self.cache_timeout = 3600  # Cache timeout in seconds (1 hour)
@@ -819,6 +830,10 @@ class Music(commands.Cog):
             candidates.append({
                 'video_id': video_id,
                 'title': title,
+                'artists': [
+                    artist['name'] for artist in result.get('artists') or []
+                    if isinstance(artist, dict) and artist.get('name')
+                ],
                 # Songs credit their artists; videos may only name them in the title.
                 'artist_text': artists if kind == 'songs' else f"{artists} {title}",
                 'duration': result.get('duration_seconds'),
@@ -946,13 +961,15 @@ class Music(commands.Cog):
         if idle:
             await self.play_next(ctx)
 
-    @commands.command()
+    @commands.hybrid_command()
+    @app_commands.describe(query="A YouTube or Spotify link, or the name of a song to search for")
+    @commands.guild_only()
     @commands.cooldown(1, 3, commands.BucketType.user)
-    async def play(self, ctx, *, query):
+    async def play(self, ctx, *, query: str):
         """Play a song by URL (YouTube/Spotify) or search term"""
         try:
             if not ctx.author.voice:
-                return await ctx.send("❌ You need to be in a voice channel!")
+                return await ctx.send("❌ You need to be in a voice channel!", ephemeral=True)
 
             guild_id = str(ctx.guild.id)
 
@@ -965,7 +982,11 @@ class Music(commands.Cog):
                 or self.is_resolving_track(guild_id)
             )
             if in_use and not self.can_control_player(ctx, current_vc):
-                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE, ephemeral=True)
+
+            # Joining the channel and finding the song take longer than the
+            # 3 seconds Discord waits for a slash command's first reply.
+            await defer(ctx)
 
             try:
                 vc = await self.ensure_voice_client(ctx)
@@ -1064,14 +1085,74 @@ class Music(commands.Cog):
             logger.error(f"Play command error: {str(e)}\n{traceback.format_exc()}")
             await ctx.send("❌ An error occurred while processing your request.")
 
-    @commands.command()
+    @play.autocomplete('query')
+    async def play_autocomplete(self, interaction, current: str):
+        """Suggest songs from YouTube Music while /play's query is typed."""
+        query = current.strip()
+        if (
+            len(query) < AUTOCOMPLETE_MIN_LENGTH
+            or URL_SCHEME_PATTERN.match(query)
+            or spotify.is_spotify_reference(query)
+        ):
+            return []
+
+        try:
+            # Shielded, so a search that misses this keystroke's deadline
+            # still finishes and is cached for the next one.
+            songs = await asyncio.wait_for(
+                asyncio.shield(self.suggest_songs(query)), AUTOCOMPLETE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            return []
+        except Exception as e:
+            logger.warning("Song suggestions failed for %r: %s", query, e)
+            return []
+
+        return [
+            app_commands.Choice(
+                name=self.suggestion_name(song),
+                value=f"https://www.youtube.com/watch?v={song['video_id']}",
+            )
+            for song in songs[:AUTOCOMPLETE_CHOICES]
+        ]
+
+    def suggest_songs(self, query):
+        """Return the (shared, cached) task searching YouTube Music for `query`."""
+        key = query.casefold()
+        task = self.suggestions.get(key)
+        if task is not None and task.done() and (task.cancelled() or task.exception()):
+            task = None  # try a failed search again
+        if task is None:
+            task = asyncio.ensure_future(self.ytmusic_candidates(query, 'songs'))
+            # Nobody may await a search that missed its deadline; don't let
+            # asyncio warn that its error was never retrieved.
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            self.suggestions[key] = task
+        self.suggestions.move_to_end(key)
+        while len(self.suggestions) > AUTOCOMPLETE_CACHE_SIZE:
+            self.suggestions.popitem(last=False)
+        return task
+
+    @staticmethod
+    def suggestion_name(song):
+        """"Title — Artist (3:45)", shortened to fit an autocomplete choice."""
+        details = " — ".join(part for part in (song['title'], ", ".join(song.get('artists') or [])) if part)
+        duration = format_duration(song.get('duration'))
+        suffix = f" ({duration})" if duration else ""
+        limit = CHOICE_NAME_LIMIT - len(suffix)
+        if len(details) > limit:
+            details = details[:limit - 1] + "…"
+        return (details + suffix) or "Unknown title"
+
+    @commands.hybrid_command()
+    @commands.guild_only()
     async def stop(self, ctx):
         """Stop playing and clear the queue"""
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
             if not self.can_control_player(ctx, vc):
-                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE, ephemeral=True)
             self.voice_clients[guild_id] = vc
             self.queue[guild_id] = []
             self.loop_enabled[guild_id] = False
@@ -1080,15 +1161,18 @@ class Music(commands.Cog):
                 self.skip_requested.add(guild_id)
                 vc.stop()
             await ctx.send("⏹️ Stopped playing and cleared the queue")
+        else:
+            await ctx.send("I'm not in a voice channel!")
 
-    @commands.command()
+    @commands.hybrid_command()
+    @commands.guild_only()
     async def skip(self, ctx):
         """Skip the current song"""
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
             if not self.can_control_player(ctx, vc):
-                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE, ephemeral=True)
             self.voice_clients[guild_id] = vc
             if self.is_player_busy(vc):
                 self.skip_requested.add(guild_id)
@@ -1096,8 +1180,11 @@ class Music(commands.Cog):
                 await ctx.send("⏭️ Skipped current song")
             else:
                 await ctx.send("Nothing is playing!")
+        else:
+            await ctx.send("I'm not in a voice channel!")
 
-    @commands.command()
+    @commands.hybrid_command()
+    @commands.guild_only()
     async def queue(self, ctx):
         """Show the current queue"""
         guild_id = str(ctx.guild.id)
@@ -1120,7 +1207,8 @@ class Music(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @commands.command(name="loop")
+    @commands.hybrid_command(name="loop")
+    @commands.guild_only()
     async def loop_track(self, ctx):
         """Toggle looping for the current song"""
         guild_id = str(ctx.guild.id)
@@ -1131,31 +1219,35 @@ class Music(commands.Cog):
             return
 
         if not self.can_control_player(ctx, vc):
-            return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
+            return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE, ephemeral=True)
 
         self.loop_enabled[guild_id] = not self.loop_enabled.get(guild_id, False)
         status = "enabled" if self.loop_enabled[guild_id] else "disabled"
         await ctx.send(f"🔁 Loop {status}")
 
-    @commands.command()
+    @commands.hybrid_command()
+    @commands.guild_only()
     async def leave(self, ctx):
         """Leave the voice channel"""
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
             if not self.can_control_player(ctx, vc):
-                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE, ephemeral=True)
             await self.leave_voice(ctx.guild)
             await ctx.send("👋 Left the voice channel")
+        else:
+            await ctx.send("I'm not in a voice channel!")
 
-    @commands.command()
+    @commands.hybrid_command()
+    @commands.guild_only()
     async def pause(self, ctx):
         """Pause/Resume the current song"""
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
             if not self.can_control_player(ctx, vc):
-                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE)
+                return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE, ephemeral=True)
             self.voice_clients[guild_id] = vc
             if vc.is_playing():
                 vc.pause()

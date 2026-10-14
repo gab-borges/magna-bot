@@ -17,7 +17,7 @@ class Typing:
 
 
 def make_ctx():
-    return SimpleNamespace(send=AsyncMock(), typing=Typing)
+    return SimpleNamespace(send=AsyncMock(), typing=Typing, interaction=None)
 
 
 def make_client(response=None, error=None):

@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 import calendar
 import datetime
@@ -97,16 +98,20 @@ class Birthday(commands.Cog):
     async def before_check(self):
         await self.bot.wait_until_ready()
 
-    @commands.group(invoke_without_command=True)
+    # Slash command groups can't run on their own, so this is /birthday help.
+    @commands.hybrid_group(invoke_without_command=True, fallback="help")
+    @commands.guild_only()
     async def birthday(self, ctx):
         """Birthday commands"""
-        await ctx.send("Use `%birthday add <dd-mm>` to add your birthday\n"
-                      "Use `%birthday remove` to remove your birthday\n"
-                      "Use `%birthday list` to see all birthdays")
+        await ctx.send("Use `%birthday add <member> <dd-mm>` to add a member's birthday\n"
+                      "Use `%birthday remove <member>` to remove a member's birthday\n"
+                      "Use `%birthday list` to see all birthdays\n"
+                      "(they also work as `/birthday` commands)")
 
     # > Commands <  
     @commands.has_permissions(administrator=True)
     @birthday.command(name="add")
+    @app_commands.describe(member="Whose birthday it is", date="Day and month, like 25-12")
     async def add_birthday(self, ctx, member: discord.Member, date: str):
         """Add a member's birthday (format: dd-mm)"""
         try:
@@ -121,6 +126,7 @@ class Birthday(commands.Cog):
 
     @commands.has_permissions(administrator=True)
     @birthday.command(name="remove")
+    @app_commands.describe(member="Whose birthday to remove")
     async def remove_birthday(self, ctx, member: discord.Member):
         """Remove a member's birthday"""
         if str(member.id) in self.birthdays:
@@ -148,6 +154,7 @@ class Birthday(commands.Cog):
 
     @commands.has_permissions(administrator=True)
     @birthday.command(name="setchannel")
+    @app_commands.describe(channel="Where to announce birthdays (default: this channel)")
     async def set_channel(self, ctx, channel: discord.TextChannel = None):
         """Set the birthday announcement channel"""
         channel = channel or ctx.channel
