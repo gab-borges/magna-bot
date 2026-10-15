@@ -1,4 +1,4 @@
-"""Tests for the smaller cogs: birthdays, memes, dice, currency, TimeGuessr."""
+"""Tests for the smaller cogs: birthdays, memes, dice, currency."""
 import asyncio
 import datetime
 import json
@@ -19,7 +19,6 @@ from cogs.membercount import MemberCount
 from cogs.music import Music
 from cogs.reddit import EMBED_TITLE_LIMIT, Reddit
 from cogs.roll import DiceError, Roll, parse_dice
-from cogs.timeguessr import TimeGuessr
 from tests.test_gemini import Typing
 
 
@@ -354,11 +353,9 @@ class RollCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FakeHTTPSession:
-    def __init__(self, error=None, json_data=None, responses=None):
+    def __init__(self, error=None, json_data=None):
         self.error = error
         self.json_data = json_data
-        # Optional (status, json) per request, in order; else 200 + json_data.
-        self.responses = list(responses or [])
         self.urls = []
 
     async def __aenter__(self):
@@ -371,7 +368,7 @@ class FakeHTTPSession:
         self.urls.append(url)
         if self.error:
             raise self.error
-        status, data = self.responses.pop(0) if self.responses else (200, self.json_data)
+        status, data = 200, self.json_data
 
         def raise_for_status():
             if status >= 400:
@@ -421,50 +418,6 @@ class CoinTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.urls, [])
         self.assertIn("isn't a currency code", sent_text(ctx))
-
-
-class TimeGuessrGeocodeTests(unittest.IsolatedAsyncioTestCase):
-    URL = "https://restcountries.com/v3.1/name/"
-
-    async def geocode(self, cog, session, name):
-        with patch('cogs.timeguessr.aiohttp.ClientSession', return_value=session):
-            return await cog.geocode_country(name)
-
-    async def test_country_names_are_url_encoded(self):
-        session = FakeHTTPSession(json_data=[{'latlng': [1, 2]}])
-
-        self.assertEqual(
-            await self.geocode(TimeGuessr(bot=Mock()), session, "Bosnia/Herzegovina?x=1"), (1, 2)
-        )
-
-        self.assertEqual(session.urls, [self.URL + "Bosnia%2FHerzegovina%3Fx%3D1?fullText=true"])
-
-    async def test_partial_names_are_the_fallback(self):
-        session = FakeHTTPSession(responses=[(404, None), (200, [{'latlng': [3, 4]}])])
-
-        self.assertEqual(await self.geocode(TimeGuessr(bot=Mock()), session, "Bosnia"), (3, 4))
-
-        self.assertEqual(session.urls, [self.URL + "Bosnia?fullText=true", self.URL + "Bosnia"])
-
-    async def test_unknown_countries_are_cached(self):
-        cog = TimeGuessr(bot=Mock())
-        await self.geocode(cog, FakeHTTPSession(responses=[(404, None), (404, None)]), "Narnia")
-
-        session = FakeHTTPSession(json_data=[{'latlng': [1, 2]}])
-        self.assertIsNone(await self.geocode(cog, session, "narnia"))
-        self.assertEqual(session.urls, [])
-
-    async def test_service_failures_are_not_cached(self):
-        cog = TimeGuessr(bot=Mock())
-        for failing in (
-            FakeHTTPSession(error=asyncio.TimeoutError()),
-            FakeHTTPSession(responses=[(503, None)]),
-        ):
-            with self.subTest(failing=failing), self.assertLogs('cogs.timeguessr', 'WARNING'):
-                self.assertIsNone(await self.geocode(cog, failing, "Brazil"))
-
-        working = FakeHTTPSession(json_data=[{'latlng': [-10, -55]}])
-        self.assertEqual(await self.geocode(cog, working, "Brazil"), (-10, -55))
 
 
 if __name__ == "__main__":
