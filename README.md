@@ -76,11 +76,26 @@ playing or queued, or 2 minutes after everyone else has left it.
 - `%tg diario [segundos]`: today's daily challenge, the same for everyone.
 - `%tgstop`: ends the game (whoever started it, or a moderator).
 
-Players answer in the chat with `país, ano` (e.g. `Brazil, 2016`). The photos
-already shown are kept in `timeguessr_seen.json` in the data directory. Only
-the daily challenge comes from a public endpoint; random games read the data
-the site's own pages load, so a change to the site can break them (`%tg diario`
-keeps working then).
+Each photo has a **✏️ Palpitar** button that opens a form for the country and
+the year, so nobody sees (or copies) a guess before the answer; a guess typed
+in the chat is deleted (when the bot may) with a hint to use the button. A
+guess can be changed until the round ends, and from the second round on, a
+round ends as soon as everyone who played the earlier rounds has guessed.
+
+Countries can be typed in Portuguese or English, as codes (`EUA`, `UK`) and
+without accents, and small typos are forgiven; the country names and
+coordinates come with the bot (`magna/countries.json`, from
+[mledoze/countries](https://github.com/mledoze/countries), ODbL). Scoring:
+up to 2,500 points for the year (100 fewer per year off) and 2,500 for the
+place: all of them for the right country, otherwise fewer the farther the
+guessed country's center is from the photo. The answer shows how many years
+and kilometers each player was off, with links to Google Maps and, when
+TimeGuessr has one, Street View.
+
+The photos already shown are kept in `timeguessr_seen.json` in the data
+directory. Only the daily challenge comes from a public endpoint; random
+games read the data the site's own pages load, so a change to the site can
+break them (`%tg diario` keeps working then).
 
 ## Setup 🚀
 

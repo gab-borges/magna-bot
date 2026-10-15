@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, Mock, patch
 from discord.ext import commands
 
 from cogs import timeguessr
-from cogs.timeguessr import GameMode, TimeGuessr, month_range, page_data, unflatten
+from cogs.timeguessr import (
+    GameMode, Guess, GuessModal, GuessRound, Result, TimeGuessr, fit_lines, month_range,
+    page_data, street_view_link, unflatten,
+)
+from magna import countries
 
 ROUND = {'URL': 'https://img.example/1.jpg', 'Year': '2016', 'Country': 'Brazil'}
 
@@ -104,7 +108,7 @@ def make_cog():
     cog.reaction_timeout = 0.01
     cog.fetch_rounds = AsyncMock(return_value=[ROUND, ROUND])
     cog.play_round = AsyncMock(return_value={})
-    cog.score_round = AsyncMock(return_value={})
+    cog.score_round = Mock(return_value={})
     cog.show_answer = AsyncMock(return_value=SimpleNamespace(id=99, add_reaction=AsyncMock()))
     cog.show_final_scoreboard = AsyncMock()
     return cog
@@ -383,6 +387,360 @@ class RandomRoundsTests(TempDataDir):
                 self.assertEqual(await cog.fetch_archive_day(session), [photo('d0')])
 
         self.assertEqual(session.requests.count((timeguessr.ARCHIVE_URL, (('month', '2026-09'),))), 1)
+
+
+class CountryTests(unittest.TestCase):
+    def assertFinds(self, text, code):
+        found = countries.find(text)
+        self.assertIsNotNone(found, text)
+        self.assertEqual(found.code, code, text)
+
+    def test_portuguese_english_and_codes(self):
+        for text, code in [
+            ("Brasil", "BRA"), ("Brazil", "BRA"), ("BR", "BRA"),
+            ("EUA", "USA"), ("Estados Unidos", "USA"), ("USA", "USA"), ("US", "USA"),
+            ("Alemanha", "DEU"), ("Japão", "JPN"), ("Holanda", "NLD"), ("Países Baixos", "NLD"),
+            ("Inglaterra", "GBR"), ("UK", "GBR"), ("Escócia", "GBR"), ("UAE", "ARE"),
+            ("Turkey", "TUR"), ("Irã", "IRN"), ("Irão", "IRN"), ("URSS", "RUS"),
+        ]:
+            with self.subTest(text=text):
+                self.assertFinds(text, code)
+
+    def test_ignores_accents_case_and_spaces(self):
+        for text in ("japao", "JAPÃO", "  Japão  "):
+            with self.subTest(text=text):
+                self.assertFinds(text, "JPN")
+
+    def test_exact_names_win_over_close_ones(self):
+        self.assertFinds("Niger", "NER")
+        self.assertFinds("Nigéria", "NGA")
+        self.assertFinds("Austria", "AUT")
+        self.assertFinds("Australia", "AUS")
+
+    def test_start_of_a_name_and_typos(self):
+        self.assertFinds("Bosnia", "BIH")
+        self.assertFinds("Alemanah", "DEU")
+        self.assertFinds("Swizterland", "CHE")
+
+    def test_unknown(self):
+        for text in ("Narnia", "", "a", "xy"):
+            with self.subTest(text=text):
+                self.assertIsNone(countries.find(text))
+
+    def test_answers_can_name_two_countries(self):
+        found = countries.find_all("Palestinian territories or Israel")
+        self.assertEqual([country.code for country in found], ["PSE", "ISR"])
+
+    def test_names_shown_are_brazilian(self):
+        self.assertEqual(countries.find("Poland").name, "Polônia")
+        self.assertEqual(countries.find("Vietnam").name, "Vietnã")
+
+
+def make_interaction(user_id=1, name="Ana"):
+    return SimpleNamespace(
+        user=SimpleNamespace(id=user_id, display_name=name),
+        response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()),
+    )
+
+
+def replies(interaction):
+    return "\n".join(call.args[0] for call in interaction.response.send_message.await_args_list)
+
+
+class GuessRoundTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_guess_is_only_shown_to_whoever_made_it(self):
+        round_ = GuessRound(1)
+        round_.message = SimpleNamespace(edit=AsyncMock())
+        round_.embed = timeguessr.discord.Embed()
+        interaction = make_interaction()
+
+        await round_.submit(interaction, " japao ", "1985")
+
+        guess = round_.guesses[1]
+        self.assertEqual((guess.text, guess.year, guess.country.code), ("japao", 1985, "JPN"))
+        self.assertTrue(interaction.response.send_message.await_args.kwargs["ephemeral"])
+        self.assertIn("Japão", replies(interaction))
+        # The round message only says who guessed.
+        self.assertEqual(round_.embed.footer.text, "✏️ Já palpitaram: Ana")
+        self.assertNotIn("Jap", round_.embed.footer.text)
+
+    async def test_a_new_guess_replaces_the_old_one(self):
+        round_ = GuessRound(1)
+        await round_.submit(make_interaction(), "Brasil", "1990")
+        await round_.submit(make_interaction(), "Chile", "1991")
+
+        self.assertEqual(round_.guesses[1].country.code, "CHL")
+        self.assertEqual(len(round_.guesses), 1)
+
+    async def test_the_year_must_be_a_number(self):
+        round_ = GuessRound(1)
+        interaction = make_interaction()
+
+        await round_.submit(interaction, "Brasil", "anos 80")
+
+        self.assertEqual(round_.guesses, {})
+        self.assertIn("não é um ano", replies(interaction))
+
+    async def test_an_unknown_country_still_counts_with_a_warning(self):
+        round_ = GuessRound(1)
+        interaction = make_interaction()
+
+        await round_.submit(interaction, "Narnia", "1950")
+
+        self.assertIsNone(round_.guesses[1].country)
+        self.assertIn("não reconheci", replies(interaction))
+
+    async def test_no_guesses_after_the_round(self):
+        round_ = GuessRound(1)
+        round_.open = False
+        interaction = make_interaction()
+
+        await round_.submit(interaction, "Brasil", "1990")
+
+        self.assertEqual(round_.guesses, {})
+        self.assertIn("já acabou", replies(interaction))
+
+    async def test_everyone_in_once_all_players_guessed(self):
+        round_ = GuessRound(2, players={1, 2})
+        await round_.submit(make_interaction(1), "Brasil", "1990")
+        self.assertFalse(round_.everyone_in.is_set())
+
+        await round_.submit(make_interaction(3, "Novato"), "Chile", "1990")
+        self.assertFalse(round_.everyone_in.is_set())
+
+        await round_.submit(make_interaction(2, "Bia"), "Peru", "1990")
+        self.assertTrue(round_.everyone_in.is_set())
+
+    async def test_first_round_has_no_known_players_so_it_runs_to_the_end(self):
+        round_ = GuessRound(1)
+        await round_.submit(make_interaction(), "Brasil", "1990")
+        self.assertFalse(round_.everyone_in.is_set())
+
+    async def test_the_form_starts_with_the_previous_guess(self):
+        round_ = GuessRound(3)
+        await round_.submit(make_interaction(), "Japão", "1985")
+
+        modal = GuessModal(round_, 1)
+        self.assertEqual((modal.country.default, modal.year.default), ("Japão", "1985"))
+        self.assertIsNone(GuessModal(round_, 2).country.default)
+        self.assertEqual(modal.title, "Palpite — Rodada 3")
+
+
+def make_round_ctx():
+    message = SimpleNamespace(edit=AsyncMock())
+    ctx = make_ctx()
+    ctx.send = AsyncMock(return_value=message)
+    return ctx, message
+
+
+class PlayRoundTests(TempDataDir):
+    def make_cog(self):
+        cog = TimeGuessr(bot=SimpleNamespace())
+        cog.warning_lead = 0.05
+        return cog
+
+    async def test_ends_early_once_every_player_guessed(self):
+        cog = self.make_cog()
+        ctx, message = make_round_ctx()
+        cog.active_games[42] = {}
+
+        async def players_guess():
+            while 'round' not in cog.active_games[42]:
+                await asyncio.sleep(0)
+            round_ = cog.active_games[42]['round']
+            await round_.submit(make_interaction(1), "Brasil", "2016")
+            await round_.submit(make_interaction(2, "Bia"), "Chile", "2000")
+
+        guessing = asyncio.create_task(players_guess())
+        guesses = await asyncio.wait_for(
+            cog.play_round(ctx, 2, 5, ROUND, tempo=30, players={1, 2}), timeout=2
+        )
+        await guessing
+
+        self.assertEqual(set(guesses), {1, 2})
+        self.assertIn("Todo mundo já palpitou", sent_text(ctx))
+        self.assertNotIn("segundos restantes", sent_text(ctx))
+        self.assertFalse(cog.active_games[42]['round'].open)
+        # The button is turned off at the end.
+        view = message.edit.await_args.kwargs["view"]
+        self.assertTrue(all(item.disabled for item in view.children))
+
+    async def test_runs_out_the_clock_with_a_warning(self):
+        cog = self.make_cog()
+        ctx, _ = make_round_ctx()
+
+        guesses = await asyncio.wait_for(
+            cog.play_round(ctx, 1, 5, ROUND, tempo=0.1), timeout=2
+        )
+
+        self.assertEqual(guesses, {})
+        self.assertIn("segundos restantes", sent_text(ctx))
+        self.assertNotIn("Todo mundo", sent_text(ctx))
+        first = ctx.send.await_args_list[0]
+        self.assertEqual(first.kwargs["embed"].image.url, ROUND['URL'])
+        self.assertEqual(first.kwargs["view"].children[0].label, "Palpitar")
+
+    async def test_players_of_earlier_rounds_are_passed_on(self):
+        cog = make_cog()
+        cog.reaction_timeout = 60
+        cog.bot.wait_for = AsyncMock()  # someone always continues
+        cog.play_round = AsyncMock(return_value={})
+        cog.score_round = Mock(side_effect=[{1: Result(100, 0, None, False)}, {}])
+
+        await asyncio.wait_for(TimeGuessr.timeguessr.callback(cog, make_ctx()), timeout=2)
+
+        first, second = cog.play_round.await_args_list
+        self.assertEqual(set(first.args[5]), set())
+        self.assertEqual(set(second.args[5]), {1})
+
+
+class ChatGuessTests(TempDataDir):
+    def make_message(self, content, user_id=1):
+        return SimpleNamespace(
+            content=content,
+            author=SimpleNamespace(id=user_id, bot=False, mention=f"<@{user_id}>"),
+            channel=SimpleNamespace(id=42, send=AsyncMock()),
+            delete=AsyncMock(),
+        )
+
+    def make_cog(self, round_open=True):
+        cog = TimeGuessr(bot=SimpleNamespace())
+        round_ = GuessRound(1)
+        round_.open = round_open
+        cog.active_games[42] = {'round': round_}
+        return cog
+
+    async def test_a_guess_in_the_chat_is_deleted_with_a_hint_once(self):
+        cog = self.make_cog()
+        first, second = self.make_message("Brasil, 1990"), self.make_message("Chile, 1991")
+
+        await cog.on_message(first)
+        await cog.on_message(second)
+
+        first.delete.assert_awaited_once()
+        second.delete.assert_awaited_once()
+        first.channel.send.assert_awaited_once()
+        self.assertIn("Palpitar", first.channel.send.await_args.args[0])
+        second.channel.send.assert_not_awaited()
+        # It doesn't count as a guess.
+        self.assertEqual(cog.active_games[42]['round'].guesses, {})
+
+    async def test_other_messages_are_left_alone(self):
+        for content, round_open in (("bom dia", True), ("%tgstop", True), ("Brasil, 1990", False)):
+            with self.subTest(content=content, round_open=round_open):
+                cog = self.make_cog(round_open)
+                message = self.make_message(content)
+
+                await cog.on_message(message)
+
+                message.delete.assert_not_awaited()
+                message.channel.send.assert_not_awaited()
+
+    async def test_without_permission_to_delete_it_still_hints(self):
+        cog = self.make_cog()
+        message = self.make_message("Brasil, 1990")
+        message.delete = AsyncMock(side_effect=timeguessr.discord.Forbidden(Mock(status=403), "no"))
+
+        await cog.on_message(message)
+
+        message.channel.send.assert_awaited_once()
+
+
+PHOTO = {
+    'URL': 'https://img.example/1.jpg', 'Year': '1985', 'Country': 'USA',
+    'Location': {'lat': 40.7, 'lng': -74.0}, 'Description': 'Nova York',
+    'StreetView': 'https://www.google.com/maps/embed?pb=!4v1!6m8!1m7!1sPANO!2m2!1d40.7!2d-74.0!3f10.5!4f-2.5!5f0.78',
+}
+
+
+def guess(text, year, user_id=1, name="Ana"):
+    return Guess(SimpleNamespace(id=user_id, display_name=name), text, year, countries.find(text))
+
+
+class ScoringTests(TempDataDir):
+    def score(self, guesses, photo=PHOTO):
+        return TimeGuessr(bot=SimpleNamespace()).score_round(photo, guesses)
+
+    def test_right_country_in_portuguese_gets_full_location_points(self):
+        result = self.score({1: guess("EUA", 1985)})[1]
+        self.assertEqual((result.score, result.years_off, result.right_country), (5000, 0, True))
+
+    def test_wrong_country_scores_by_distance(self):
+        result = self.score({1: guess("Canadá", 1990)})[1]
+        self.assertFalse(result.right_country)
+        self.assertEqual(result.years_off, 5)
+        self.assertGreater(result.km, 1000)
+        self.assertEqual(result.score, 2000 + timeguessr.location_score(result.km))
+
+    def test_unknown_country_gets_no_location_points(self):
+        result = self.score({1: guess("Narnia", 1985)})[1]
+        self.assertEqual((result.score, result.km, result.right_country), (2500, None, False))
+
+    def test_either_country_of_an_or_answer_is_right(self):
+        photo = dict(PHOTO, Country="Palestinian territories or Israel", Location={'lat': 31.7, 'lng': 35.2})
+        self.assertTrue(self.score({1: guess("Israel", 1985)}, photo)[1].right_country)
+        self.assertTrue(self.score({1: guess("Palestina", 1985)}, photo)[1].right_country)
+
+    def test_typed_like_the_answer_is_right_even_if_unknown(self):
+        photo = dict(PHOTO, Country="Atlantis")
+        self.assertTrue(self.score({1: guess("atlantis", 1985)}, photo)[1].right_country)
+
+
+class AnswerTests(TempDataDir):
+    async def show(self, guesses, scores, photo=PHOTO):
+        ctx = make_ctx()
+        await TimeGuessr(bot=SimpleNamespace()).show_answer(ctx, 1, photo, guesses, scores)
+        embed = ctx.send.await_args.kwargs["embed"]
+        return {field.name: field.value for field in embed.fields}
+
+    async def test_shows_how_far_off_each_player_was(self):
+        guesses = {1: guess("EUA", 1985), 2: guess("Canadá", 1990, 2, "Bia"), 3: guess("Narnia", 1984, 3, "Cris")}
+        scores = {
+            1: Result(5000, 0, 0, True),
+            2: Result(3000, 5, 1234.4, False),
+            3: Result(2400, 1, None, False),
+        }
+
+        fields = await self.show(guesses, scores)
+
+        board = fields["🏆 Pontuação"]
+        self.assertLess(board.index("Ana"), board.index("Bia"))
+        self.assertIn("Estados Unidos, 1985 → **5.000** pts", board)
+        self.assertIn("✅ país certo · 📅 ano exato!", board)
+        self.assertIn("📍 a 1.234 km · 📅 5 anos de diferença", board)
+        self.assertIn("Narnia, 1984", board)
+        self.assertIn("❓ país não reconhecido · 📅 1 ano de diferença", board)
+        self.assertEqual(fields["🌎 País"], "Estados Unidos")
+
+    async def test_links_to_street_view_when_there_is_one(self):
+        fields = await self.show({}, {})
+        self.assertIn("[Street View](https://www.google.com/maps/@?api=1&map_action=pano&pano=PANO", fields["🗺️ Mapa"])
+        self.assertIn("Ninguém respondeu", fields["💬 Respostas"])
+
+        fields = await self.show({}, {}, dict(PHOTO, StreetView=""))
+        self.assertNotIn("Street View", fields["🗺️ Mapa"])
+
+    async def test_a_long_board_is_cut_between_players(self):
+        guesses = {i: guess("Canadá", 1990, i, "Jogador" * 5) for i in range(30)}
+        scores = {i: Result(3000, 5, 1234, False) for i in range(30)}
+
+        board = (await self.show(guesses, scores))["🏆 Pontuação"]
+
+        self.assertLessEqual(len(board), 1024)
+        self.assertRegex(board, r"…e mais \d+$")
+
+
+class FormattingTests(unittest.TestCase):
+    def test_street_view_link(self):
+        self.assertEqual(
+            street_view_link(PHOTO['StreetView']),
+            "https://www.google.com/maps/@?api=1&map_action=pano&pano=PANO&heading=10.5&pitch=-2.5",
+        )
+        self.assertEqual(street_view_link("https://example.com/sv"), "https://example.com/sv")
+
+    def test_fit_lines(self):
+        self.assertEqual(fit_lines(["a", "b"], 20), "a\nb")
+        self.assertEqual(fit_lines(["aaaa", "bbbb", "cccc"], 16), "aaaa\n…e mais 2")
 
 
 if __name__ == "__main__":

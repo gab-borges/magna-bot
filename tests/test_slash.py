@@ -73,6 +73,10 @@ class FakeAdapter:
         self.calls.append(('edit', payload))
         return self.message(payload)
 
+    async def edit_webhook_message(self, application_id, token, message_id, *, payload=None, **kwargs):
+        self.calls.append(('edit followup', payload))
+        return self.message(payload)
+
     def contents(self):
         """The text of every message sent, in order."""
         texts = []
@@ -116,6 +120,19 @@ async def dispatched_events():
     await asyncio.gather(*events)
 
 
+def interaction_payload(kind, data, *, created=None, **extra):
+    """The gateway payload of an interaction from a DM."""
+    created = created or discord.utils.utcnow()
+    return {
+        'id': str(discord.utils.time_snowflake(created)), 'application_id': str(BOT_ID),
+        'type': kind, 'token': 'token', 'version': 1, 'locale': 'pt-BR',
+        'channel_id': str(CHANNEL_ID), 'channel': {'id': str(CHANNEL_ID), 'type': 1},
+        'user': user_payload(USER_ID, 'gab'), 'attachment_size_limit': 8 * 1024 * 1024,
+        'entitlements': [], 'authorizing_integration_owners': {},
+        'data': data, **extra,
+    }
+
+
 def interaction(bot, name, options=(), *, kind=2, expired=False, subcommand=None):
     """A slash command (kind 2) or autocomplete (kind 4) interaction from a DM."""
     created = discord.utils.utcnow()
@@ -124,14 +141,9 @@ def interaction(bot, name, options=(), *, kind=2, expired=False, subcommand=None
     options = [dict(option) for option in options]
     if subcommand:
         options = [{'name': subcommand, 'type': 1, 'options': options}]
-    data = {
-        'id': str(discord.utils.time_snowflake(created)), 'application_id': str(BOT_ID),
-        'type': kind, 'token': 'token', 'version': 1, 'locale': 'pt-BR',
-        'channel_id': str(CHANNEL_ID), 'channel': {'id': str(CHANNEL_ID), 'type': 1},
-        'user': user_payload(USER_ID, 'gab'), 'attachment_size_limit': 8 * 1024 * 1024,
-        'entitlements': [], 'authorizing_integration_owners': {},
-        'data': {'id': '1', 'name': name, 'type': 1, 'options': options},
-    }
+    data = interaction_payload(
+        kind, {'id': '1', 'name': name, 'type': 1, 'options': options}, created=created
+    )
     return discord.Interaction(data=data, state=bot._connection)
 
 
@@ -388,6 +400,71 @@ class PrefixTests(BotTestCase):
 
         self.assertIn("só funciona em servidores", send.await_args.kwargs['content'])
         self.assertEqual(self.adapter.calls, [])
+
+
+class TimeGuessrButtonTests(BotTestCase):
+    """A guess made through the round's button and form, as Discord sends them."""
+
+    PHOTO = {
+        'URL': 'https://img.example/1.jpg', 'Year': '1985', 'Country': 'Japan',
+        'Location': {'lat': 35.7, 'lng': 139.7}, 'ImageId': 'photo-1',
+    }
+
+    async def until(self, condition):
+        for _ in range(500):
+            if condition():
+                return
+            await asyncio.sleep(0.01)
+        self.fail("timed out")
+
+    def sent_with_components(self):
+        return [payload for _, payload in self.adapter.calls if payload and payload.get('components')]
+
+    async def test_guess_through_the_button(self):
+        cog = self.bot.get_cog('TimeGuessr')
+        cog.fetch_rounds = AsyncMock(return_value=[self.PHOTO])
+        cog.min_round_time, cog.warning_lead, cog.intro_delay = 1, 0.5, 0
+        game = asyncio.create_task(self.run_slash('timeguessr', option('tempo', 2, kind=4)))
+
+        await self.until(self.sent_with_components)
+        button = self.sent_with_components()[0]['components'][0]['components'][0]
+        self.assertEqual(button['label'], 'Palpitar')
+
+        # Clicking it opens the form (response type 9).
+        clicked = len(self.adapter.calls)
+        self.bot._connection.parse_interaction_create(interaction_payload(
+            3, {'custom_id': button['custom_id'], 'component_type': 2},
+            message=FakeAdapter.message({}),
+        ))
+        await self.until(lambda: len(self.adapter.calls) > clicked)
+        _, form = self.adapter.calls[clicked]
+        self.assertEqual(form['type'], 9)
+        country_id, year_id = (row['components'][0]['custom_id'] for row in form['data']['components'])
+
+        submitted = len(self.adapter.calls)
+        self.bot._connection.parse_interaction_create(interaction_payload(5, {
+            'custom_id': form['data']['custom_id'],
+            'components': [
+                {'type': 1, 'components': [{'type': 4, 'custom_id': country_id, 'value': 'Japão'}]},
+                {'type': 1, 'components': [{'type': 4, 'custom_id': year_id, 'value': '1980'}]},
+            ],
+        }))
+        await self.until(lambda: len(self.adapter.calls) > submitted + 1)
+
+        # Only the player sees the guess; the photo only says who guessed.
+        _, reply = self.adapter.calls[submitted]
+        self.assertEqual(reply['data']['flags'], EPHEMERAL)
+        self.assertIn('Japão**, 1980', reply['data']['content'])
+        _, progress = self.adapter.calls[submitted + 1]
+        self.assertEqual(progress['embeds'][0]['footer']['text'], '✏️ Já palpitaram: gab')
+
+        await asyncio.wait_for(game, timeout=10)
+        answer = self.adapter.calls[-2][1]['embeds'][0]
+        board = next(field['value'] for field in answer['fields'] if field['name'] == '🏆 Pontuação')
+        self.assertIn('Japão, 1980 → **4.500** pts', board)
+        # The button was turned off when the round ended.
+        disabled = [payload for kind, payload in self.adapter.calls if kind == 'edit followup' and payload.get('components')]
+        self.assertTrue(disabled[-1]['components'][0]['components'][0]['disabled'])
 
 
 class PlayAutocompleteTests(unittest.IsolatedAsyncioTestCase):
