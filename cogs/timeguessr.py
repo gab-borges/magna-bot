@@ -5,10 +5,15 @@ import aiohttp
 import asyncio
 import logging
 import math
+import random
+import time
+import typing
+import unicodedata
 import urllib.parse
 from collections import defaultdict
 
 from magna.slash import defer
+from magna.storage import data_file, load_json, save_json
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +64,99 @@ def parse_guess(text):
 
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
+SITE = "https://timeguessr.com"
+DAILY_URL = f"{SITE}/getDaily"
+# Free play: every request deals 5 random photos. Like the archive, it's the
+# data the site's own pages load (SvelteKit), not a documented API.
+RANDOM_URL = f"{SITE}/game-settings/__data.json?x-sveltekit-invalidated=01"
+ARCHIVE_URL = f"{SITE}/archive/__data.json"
+DAY_URL = f"{SITE}/play/__data.json"
+
+SEEN_FILE = "timeguessr_seen.json"
+ROUNDS_PER_GAME = 5
+# Fetches of each source per game before settling for fewer new photos.
+MAX_FETCHES = 3
+
+
+def unflatten(values):
+    """Rebuild the value SvelteKit's devalue format flattened into `values`.
+
+    Lists and dicts hold indices into `values`; index 0 is the root.
+    Negative indices stand for undefined/NaN/... and become None. The typed
+    forms (["Date", ...], ["Map", ...], ...) don't appear in this data and
+    aren't supported.
+    """
+    built = {}
+
+    def build(index):
+        if index < 0:
+            return None
+        if index in built:
+            return built[index]
+        value = values[index]
+        if isinstance(value, list):
+            if value and isinstance(value[0], str):
+                raise ValueError(f"unsupported devalue type {value[0]!r}")
+            built[index] = result = []
+            result.extend(build(i) for i in value)
+        elif isinstance(value, dict):
+            built[index] = result = {}
+            for key, i in value.items():
+                result[key] = build(i)
+        else:
+            built[index] = result = value
+        return result
+
+    return build(0)
+
+
+def page_data(doc, key):
+    """The data of the page node that has `key`, from a __data.json response."""
+    for node in doc.get("nodes") or []:
+        if isinstance(node, dict) and node.get("type") == "data":
+            data = unflatten(node["data"])
+            if isinstance(data, dict) and key in data:
+                return data
+    return None
+
+
+def playable(item):
+    """Whether a round object has what a round needs (photo, year, place)."""
+    if not isinstance(item, dict) or not item.get("URL"):
+        return False
+    try:
+        int(item["Year"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return isinstance(item.get("Location"), dict)
+
+
+def image_key(round_data):
+    return round_data.get("ImageId") or round_data["URL"]
+
+
+def month_range(first, last):
+    """The "YYYY-MM" months from `first` to `last`, both included."""
+    year, month = map(int, first.split("-"))
+    end = tuple(map(int, last.split("-")))
+    months = []
+    while (year, month) <= end:
+        months.append(f"{year:04d}-{month:02d}")
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return months or [last]
+
+
+class GameMode(commands.Converter):
+    """'aleatorio' or 'diario', accents and case ignored."""
+
+    choices = ("aleatorio", "diario")
+
+    async def convert(self, ctx, argument):
+        plain = unicodedata.normalize("NFKD", argument.lower()).encode("ascii", "ignore").decode()
+        if plain in self.choices:
+            return plain
+        raise commands.BadArgument(f"Modo desconhecido: {argument}")
+
 
 class TimeGuessr(commands.Cog):
     min_round_time = 10  # the 10-second warning needs at least this much
@@ -70,21 +168,105 @@ class TimeGuessr(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.active_games = {}  # channel_id -> {'starter_id': int, 'task': Task}
-        self.api_url = "https://timeguessr.com/getDaily"
         self.country_cache = {}  # name -> (lat, lng) or None
+        self.archive_months = {}  # past "YYYY-MM" -> its archive listing
+        # scope (server, or DM channel) -> keys of the photos already shown
+        try:
+            saved = load_json(data_file(SEEN_FILE), {})
+        except ValueError:
+            logger.exception("Could not read %s; starting over", SEEN_FILE)
+            saved = {}
+        self.seen = {scope: set(keys) for scope, keys in saved.items()}
 
-    async def fetch_rounds(self):
-        """Fetch daily round data from TimeGuessr API."""
+    @staticmethod
+    def scope_of(ctx):
+        """Photos aren't repeated within a server (or a DM channel)."""
+        guild = getattr(ctx, "guild", None)
+        return str(guild.id) if guild else f"channel-{ctx.channel.id}"
+
+    def mark_seen(self, scope, round_data):
+        self.seen.setdefault(scope, set()).add(image_key(round_data))
+        try:
+            save_json(
+                data_file(SEEN_FILE),
+                {key: sorted(keys) for key, keys in self.seen.items()},
+            )
+        except OSError:
+            logger.exception("Could not save %s", SEEN_FILE)
+
+    async def fetch_rounds(self, mode="aleatorio", scope=None):
+        """The rounds of a game, or None when TimeGuessr couldn't be reached."""
         try:
             async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-                async with session.get(self.api_url) as response:
-                    if response.status != 200:
-                        return None
-                    data = await response.json()
-                    # The API returns a list of 5 round objects + a trailing 0
-                    return [item for item in data if isinstance(item, dict)]
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                if mode == "diario":
+                    return await self.fetch_daily(session)
+                return await self.fetch_unseen(session, self.seen.get(scope, set()))
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError, TypeError):
+            logger.warning("Could not fetch TimeGuessr rounds", exc_info=True)
             return None
+
+    @staticmethod
+    async def get_json(session, url, params=None):
+        async with session.get(url, params=params) as response:
+            response.raise_for_status()
+            return await response.json(content_type=None)
+
+    async def fetch_daily(self, session):
+        """Today's 5 rounds (the API adds a trailing 0 to the list)."""
+        data = await self.get_json(session, DAILY_URL)
+        return [item for item in data if playable(item)] or None
+
+    async def fetch_unseen(self, session, seen):
+        """5 photos not shown before, from free play and past dailies.
+
+        A source that fails is skipped as long as the other one works.
+        """
+        found = {}  # key -> round, keeps the order they came in
+        failures = 0
+        for _ in range(MAX_FETCHES):
+            for source in (self.fetch_free_play, self.fetch_archive_day):
+                try:
+                    rounds = await source(session)
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError, TypeError):
+                    logger.warning("TimeGuessr source %s failed", source.__name__, exc_info=True)
+                    failures += 1
+                    continue
+                for item in rounds:
+                    key = image_key(item)
+                    if key not in seen:
+                        found.setdefault(key, item)
+            if len(found) >= ROUNDS_PER_GAME:
+                break
+        if not found and failures == 2 * MAX_FETCHES:
+            return None
+        rounds = list(found.values())
+        random.shuffle(rounds)
+        return rounds[:ROUNDS_PER_GAME]
+
+    async def fetch_free_play(self, session):
+        data = page_data(await self.get_json(session, RANDOM_URL), "playArray")
+        return [item for item in data["playArray"] if playable(item)]
+
+    async def fetch_archive_day(self, session):
+        """The rounds of a random past daily."""
+        current = page_data(await self.get_json(session, ARCHIVE_URL), "archive")["archive"]
+        month = random.choice(month_range(current["minMonth"], current["currentMonth"]))
+        listing = current if month == current["month"] else await self.archive_month(session, month)
+        days = [day for day in listing["days"] if day.get("link") and not day.get("isToday")]
+        if not days:
+            return []
+        link = urllib.parse.urlsplit(random.choice(days)["link"])
+        archive = urllib.parse.parse_qs(link.query)["archive"][0]
+        doc = await self.get_json(session, DAY_URL, {"mode": "daily", "archive": archive})
+        data = page_data(doc, "playArray")
+        return [item for item in data["playArray"] if playable(item)]
+
+    async def archive_month(self, session, month):
+        """A past month's listing; those don't change, so they're kept."""
+        if month not in self.archive_months:
+            doc = await self.get_json(session, ARCHIVE_URL, {"month": month})
+            self.archive_months[month] = page_data(doc, "archive")["archive"]
+        return self.archive_months[month]
 
     async def geocode_country(self, country_name):
         """Get (lat, lng) for a country name via restcountries API. Cached.
@@ -131,16 +313,24 @@ class TimeGuessr(commands.Cog):
 
     @commands.hybrid_command(name="timeguessr", aliases=["tg"])
     @app_commands.describe(
-        tempo=f"Segundos por rodada, de {min_round_time} a {max_round_time} (padrão: 30)"
+        modo="Aleatório: fotos que ainda não apareceram aqui (padrão). Diário: o desafio de hoje.",
+        tempo=f"Segundos por rodada, de {min_round_time} a {max_round_time} (padrão: 30)",
     )
-    async def timeguessr(self, ctx, tempo: int = 30):
+    @app_commands.choices(modo=[
+        app_commands.Choice(name="Aleatório", value="aleatorio"),
+        app_commands.Choice(name="Diário", value="diario"),
+    ])
+    async def timeguessr(self, ctx, modo: typing.Optional[GameMode] = None, tempo: int = 30):
         """
         Start a TimeGuessr game!
         An image is shown each round and players guess where/when it was taken.
-        Usage: %timeguessr [segundos]  (padrão: 30)
+        Usage: %timeguessr [diario] [segundos]  (padrão: aleatório, 30)
+        Sem modo, as fotos são sorteadas e não se repetem no servidor;
+        "diario" joga o desafio do dia do site.
         Format: país, ano  (ex: Brazil, 2016)
         Use %tgstop para encerrar o jogo.
         """
+        modo = modo or "aleatorio"
         if not self.min_round_time <= tempo <= self.max_round_time:
             await ctx.send(
                 f"⚠️ O tempo por rodada deve ficar entre {self.min_round_time} "
@@ -158,9 +348,16 @@ class TimeGuessr(commands.Cog):
 
         try:
             await defer(ctx)
-            rounds = await self.fetch_rounds()
-            if not rounds:
+            scope = self.scope_of(ctx)
+            rounds = await self.fetch_rounds(modo, scope)
+            if rounds is None:
                 await ctx.send("❌ Não consegui buscar os dados do TimeGuessr. Tente novamente mais tarde.")
+                return
+            if not rounds:
+                await ctx.send(
+                    "😮 Não achei fotos novas para esse servidor agora. "
+                    "Tente de novo daqui a pouco, ou jogue o desafio do dia com `%tg diario`."
+                )
                 return
 
             # Per-player total scores across rounds
@@ -170,7 +367,8 @@ class TimeGuessr(commands.Cog):
                 embed=discord.Embed(
                     title="🌍 TimeGuessr",
                     description=(
-                        "O jogo vai começar!\n"
+                        f"{'📅 Desafio diário' if modo == 'diario' else '🎲 Fotos aleatórias'} — "
+                        "o jogo vai começar!\n"
                         f"**{len(rounds)} rodadas** — {tempo} segundos cada.\n\n"
                         "Envie seu palpite no formato: **país, ano**\n"
                         "Exemplo: `Brazil, 2016`"
@@ -181,6 +379,7 @@ class TimeGuessr(commands.Cog):
             await asyncio.sleep(self.intro_delay)
 
             for i, round_data in enumerate(rounds, start=1):
+                self.mark_seen(scope, round_data)
                 guesses = await self.play_round(ctx, i, len(rounds), round_data, tempo)
                 round_scores = await self.score_round(round_data, guesses)
 
@@ -234,7 +433,6 @@ class TimeGuessr(commands.Cog):
 
     async def play_round(self, ctx, round_num, total_rounds, round_data, tempo=30):
         """Display the image and collect guesses for `tempo` seconds."""
-        import time
         deadline_unix = int(time.time()) + tempo
 
         embed = discord.Embed(
@@ -380,7 +578,7 @@ class TimeGuessr(commands.Cog):
             description="\n".join(lines),
             color=discord.Color.gold(),
         )
-        embed.set_footer(text="Pontuação máxima: 25.000 pts (5.000 por rodada)")
+        embed.set_footer(text="Pontuação máxima: 5.000 pts por rodada")
         await ctx.send(embed=embed)
 
 

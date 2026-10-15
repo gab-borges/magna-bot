@@ -9,6 +9,7 @@ A Discord bot built with Python and discord.py that combines fun interactions wi
 - **Birthday Tracking**: Manage and celebrate member birthdays (`%birthday`)
 - **Member Counter**: Automatic server member counting
 - **Simple Commands**: Basic interaction commands (`%hello`, `%ping`)
+- **TimeGuessr**: Guess where and when photos were taken (`%tg`, see below)
 - **Music Player**: Advanced music player with multiple features:
   - Play YouTube URLs (`%play [url]`)
   - Search and play songs (`%play [search term]`)
@@ -66,6 +67,20 @@ Playback controls (and `%play` while music is playing) only work from the bot's
 voice channel, unless the member has the *Move Members* permission.
 The bot leaves the voice channel on its own after 5 minutes with nothing
 playing or queued, or 2 minutes after everyone else has left it.
+
+## TimeGuessr 🌍
+
+- `%tg [segundos]`: a game with 5 random photos from
+  [TimeGuessr](https://timeguessr.com) (its free play mode and past daily
+  challenges). Photos already shown in a server aren't shown there again.
+- `%tg diario [segundos]`: today's daily challenge, the same for everyone.
+- `%tgstop`: ends the game (whoever started it, or a moderator).
+
+Players answer in the chat with `país, ano` (e.g. `Brazil, 2016`). The photos
+already shown are kept in `timeguessr_seen.json` in the data directory. Only
+the daily challenge comes from a public endpoint; random games read the data
+the site's own pages load, so a change to the site can break them (`%tg diario`
+keeps working then).
 
 ## Setup 🚀
 
@@ -216,6 +231,6 @@ printf '%s' "$DOCKERHUB_TOKEN" | podman login docker.io -u gabborges --password-
 ```
 
 O `.env` e os cookies não são copiados para a imagem. `birthdays.json`,
-`birthday_channels.json`, `birthday_state.json`, `membercount.json` e
-`app_commands.json` ficam no diretório `data`, portanto continuam existindo
+`birthday_channels.json`, `birthday_state.json`, `membercount.json`,
+`timeguessr_seen.json` e `app_commands.json` ficam no diretório `data`, portanto continuam existindo
 quando o container for recriado.
