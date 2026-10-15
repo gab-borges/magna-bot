@@ -155,6 +155,54 @@ class TimeLimitTests(TempDataDir):
                 self.assertIn("segundos", sent_text(ctx))
 
 
+class RoundCountTests(TempDataDir):
+    async def test_rejects_round_counts_outside_the_allowed_range(self):
+        for rodadas in (0, -1, 16):
+            with self.subTest(rodadas=rodadas):
+                cog = make_cog()
+                ctx = make_ctx()
+
+                await asyncio.wait_for(TimeGuessr.timeguessr.callback(cog, ctx, rodadas=rodadas), timeout=1)
+
+                cog.fetch_rounds.assert_not_awaited()
+                self.assertNotIn(42, cog.active_games)
+                self.assertIn("rodadas", sent_text(ctx))
+
+    async def test_asks_for_and_plays_that_many_rounds(self):
+        cog = make_cog()
+        cog.fetch_rounds = AsyncMock(return_value=[photo(str(i)) for i in range(10)])
+        cog.bot.wait_for = AsyncMock()  # someone always continues
+        ctx = make_ctx()
+
+        await asyncio.wait_for(TimeGuessr.timeguessr.callback(cog, ctx, rodadas=10), timeout=2)
+
+        cog.fetch_rounds.assert_awaited_once_with('aleatorio', '7', 10)
+        self.assertEqual(cog.play_round.await_count, 10)
+        intro = ctx.send.await_args_list[0].kwargs["embed"].description
+        self.assertIn("**10 rodadas**", intro)
+        self.assertNotIn("ℹ️", intro)
+
+    async def test_says_when_there_are_fewer_photos_than_asked(self):
+        for modo, expected in (('aleatorio', "Só achei 3 fotos novas"), ('diario', "diário tem só 3 fotos")):
+            with self.subTest(modo=modo):
+                cog = make_cog()
+                cog.fetch_rounds = AsyncMock(return_value=[photo(str(i)) for i in range(3)])
+                ctx = make_ctx()
+
+                await asyncio.wait_for(TimeGuessr.timeguessr.callback(cog, ctx, modo, rodadas=8), timeout=2)
+
+                self.assertIn(expected, ctx.send.await_args_list[0].kwargs["embed"].description)
+
+    async def test_one_round(self):
+        cog = make_cog()
+        cog.fetch_rounds = AsyncMock(return_value=[ROUND])
+        ctx = make_ctx()
+
+        await asyncio.wait_for(TimeGuessr.timeguessr.callback(cog, ctx, rodadas=1), timeout=2)
+
+        self.assertIn("**1 rodada**", ctx.send.await_args_list[0].kwargs["embed"].description)
+
+
 class StopCommandTests(TempDataDir):
     async def start_game(self, cog):
         cog.reaction_timeout = 60
@@ -218,7 +266,7 @@ class ModeTests(TempDataDir):
             with self.subTest(modo=modo):
                 cog = make_cog()
                 await asyncio.wait_for(TimeGuessr.timeguessr.callback(cog, make_ctx(), modo), timeout=2)
-                cog.fetch_rounds.assert_awaited_once_with(expected, '7')
+                cog.fetch_rounds.assert_awaited_once_with(expected, '7', 5)
 
     async def test_mode_names_ignore_accents_and_case(self):
         for text in ('diario', 'Diário', 'DIARIO', 'aleatório'):
@@ -298,9 +346,31 @@ class RandomRoundsTests(TempDataDir):
             (timeguessr.DAY_URL, (('archive', '1219-abc'), ('mode', 'daily'))): archive_day,
         }
 
-    async def fetch(self, cog, session, scope='7'):
+    async def fetch(self, cog, session, scope='7', count=5):
         with patch('cogs.timeguessr.aiohttp.ClientSession', return_value=session):
-            return await cog.fetch_rounds('aleatorio', scope)
+            return await cog.fetch_rounds('aleatorio', scope, count)
+
+    async def test_longer_games_fetch_more_photos(self):
+        cog = TimeGuessr(bot=Mock())
+        batches = iter(range(100))
+
+        def new_batch(prefix):
+            return lambda: page({'playArray': [photo(f'{prefix}{next(batches)}') for _ in range(5)]})
+
+        session = FakeSession(self.routes(new_batch('f'), new_batch('d')))
+
+        rounds = await self.fetch(cog, session, count=15)
+
+        self.assertEqual(len({r['ImageId'] for r in rounds}), 15)
+        # Two passes of both sources were enough.
+        self.assertEqual(session.requests.count((timeguessr.RANDOM_URL, ())), 2)
+
+    async def test_longer_games_get_more_passes_before_settling(self):
+        cog = TimeGuessr(bot=Mock())
+        session = FakeSession(self.routes(page({'playArray': [photo('f')]}), page({'playArray': [photo('d')]})))
+
+        self.assertEqual(len(await self.fetch(cog, session, count=15)), 2)
+        self.assertEqual(session.requests.count((timeguessr.RANDOM_URL, ())), timeguessr.MAX_FETCHES + 2)
 
     async def test_mixes_free_play_and_past_dailies_without_repeats(self):
         cog = TimeGuessr(bot=Mock())
@@ -361,6 +431,14 @@ class RandomRoundsTests(TempDataDir):
 
         with patch('cogs.timeguessr.aiohttp.ClientSession', return_value=session):
             rounds = await cog.fetch_rounds('diario', '7')
+
+        self.assertEqual([r['ImageId'] for r in rounds], ['a', 'b'])
+
+    async def test_fewer_rounds_cut_the_daily(self):
+        session = FakeSession({(timeguessr.DAILY_URL, ()): [photo('a'), photo('b'), photo('c'), 0]})
+
+        with patch('cogs.timeguessr.aiohttp.ClientSession', return_value=session):
+            rounds = await TimeGuessr(bot=Mock()).fetch_rounds('diario', '7', 2)
 
         self.assertEqual([r['ImageId'] for r in rounds], ['a', 'b'])
 

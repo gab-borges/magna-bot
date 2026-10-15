@@ -357,6 +357,15 @@ class InteractionTests(BotTestCase):
         }]}})])
         music.ytmusic_candidates.assert_awaited_once_with('never gonna', 'songs')
 
+    async def test_timeguessr_options(self):
+        command = self.bot.tree.get_command('timeguessr').to_dict(self.bot.tree)
+        options = {option['name']: option for option in command['options']}
+
+        self.assertEqual(list(options), ['modo', 'tempo', 'rodadas'])
+        self.assertEqual([choice['value'] for choice in options['modo']['choices']], ['aleatorio', 'diario'])
+        self.assertEqual(options['rodadas']['type'], 4)  # integer
+        self.assertFalse(options['rodadas'].get('required', False))
+
     async def test_coin_suggests_currencies_while_typing(self):
         calls = await self.run_slash(
             'coin', option('amount', 5, kind=10), option('from_currency', 'real', focused=True), kind=4,

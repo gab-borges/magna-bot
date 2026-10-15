@@ -70,10 +70,14 @@ playing or queued, or 2 minutes after everyone else has left it.
 
 ## TimeGuessr 🌍
 
-- `%tg [segundos]`: a game with 5 random photos from
+- `%tg [segundos] [rodadas]`: a game with random photos from
   [TimeGuessr](https://timeguessr.com) (its free play mode and past daily
-  challenges). Photos already shown in a server aren't shown there again.
-- `%tg diario [segundos]`: today's daily challenge, the same for everyone.
+  challenges), 5 by default and up to 15: `%tg 45 10` plays 10 rounds of 45
+  seconds. Photos already shown in a server aren't shown there again.
+- `%tg diario [segundos] [rodadas]`: today's daily challenge, the same for
+  everyone. It has 5 photos, so `rodadas` can only shorten it.
+- `/timeguessr` takes the same options (`modo`, `tempo`, `rodadas`), each
+  optional.
 - `%tgstop`: ends the game (whoever started it, or a moderator).
 
 Each photo has a **✏️ Palpitar** button that opens a form for the country and

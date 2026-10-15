@@ -80,7 +80,8 @@ ARCHIVE_URL = f"{SITE}/archive/__data.json"
 DAY_URL = f"{SITE}/play/__data.json"
 
 SEEN_FILE = "timeguessr_seen.json"
-ROUNDS_PER_GAME = 5
+ROUNDS_PER_GAME = 5  # the default, and how many photos each source gives
+MAX_ROUNDS = 15
 # Fetches of each source per game before settling for fewer new photos.
 MAX_FETCHES = 3
 
@@ -368,13 +369,17 @@ class TimeGuessr(commands.Cog):
         except OSError:
             logger.exception("Could not save %s", SEEN_FILE)
 
-    async def fetch_rounds(self, mode="aleatorio", scope=None):
-        """The rounds of a game, or None when TimeGuessr couldn't be reached."""
+    async def fetch_rounds(self, mode="aleatorio", scope=None, count=ROUNDS_PER_GAME):
+        """The rounds of a game, or None when TimeGuessr couldn't be reached.
+
+        The daily challenge has its own 5 photos; `count` can only shorten it.
+        """
         try:
             async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
                 if mode == "diario":
-                    return await self.fetch_daily(session)
-                return await self.fetch_unseen(session, self.seen.get(scope, set()))
+                    rounds = await self.fetch_daily(session)
+                    return rounds and rounds[:count]
+                return await self.fetch_unseen(session, self.seen.get(scope, set()), count)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError, TypeError):
             logger.warning("Could not fetch TimeGuessr rounds", exc_info=True)
             return None
@@ -390,14 +395,16 @@ class TimeGuessr(commands.Cog):
         data = await self.get_json(session, DAILY_URL)
         return [item for item in data if playable(item)] or None
 
-    async def fetch_unseen(self, session, seen):
-        """5 photos not shown before, from free play and past dailies.
+    async def fetch_unseen(self, session, seen, count=ROUNDS_PER_GAME):
+        """`count` photos not shown before, from free play and past dailies.
 
         A source that fails is skipped as long as the other one works.
         """
         found = {}  # key -> round, keeps the order they came in
         failures = 0
-        for _ in range(MAX_FETCHES):
+        # Each pass brings up to 2 x 5 photos; longer games get more passes.
+        passes = MAX_FETCHES + (count - 1) // ROUNDS_PER_GAME
+        for _ in range(passes):
             for source in (self.fetch_free_play, self.fetch_archive_day):
                 try:
                     rounds = await source(session)
@@ -409,13 +416,13 @@ class TimeGuessr(commands.Cog):
                     key = image_key(item)
                     if key not in seen:
                         found.setdefault(key, item)
-            if len(found) >= ROUNDS_PER_GAME:
+            if len(found) >= count:
                 break
-        if not found and failures == 2 * MAX_FETCHES:
+        if not found and failures == 2 * passes:
             return None
         rounds = list(found.values())
         random.shuffle(rounds)
-        return rounds[:ROUNDS_PER_GAME]
+        return rounds[:count]
 
     async def fetch_free_play(self, session):
         data = page_data(await self.get_json(session, RANDOM_URL), "playArray")
@@ -446,16 +453,21 @@ class TimeGuessr(commands.Cog):
     @app_commands.describe(
         modo="Aleatório: fotos que ainda não apareceram aqui (padrão). Diário: o desafio de hoje.",
         tempo=f"Segundos por rodada, de {min_round_time} a {max_round_time} (padrão: 30)",
+        rodadas=f"Quantas fotos, de 1 a {MAX_ROUNDS} (padrão: {ROUNDS_PER_GAME}; o diário tem só {ROUNDS_PER_GAME})",
     )
     @app_commands.choices(modo=[
         app_commands.Choice(name="Aleatório", value="aleatorio"),
         app_commands.Choice(name="Diário", value="diario"),
     ])
-    async def timeguessr(self, ctx, modo: typing.Optional[GameMode] = None, tempo: int = 30):
+    async def timeguessr(
+        self, ctx, modo: typing.Optional[GameMode] = None, tempo: int = 30,
+        rodadas: int = ROUNDS_PER_GAME,
+    ):
         """
         Start a TimeGuessr game!
         An image is shown each round and players guess where/when it was taken.
-        Usage: %timeguessr [diario] [segundos]  (padrão: aleatório, 30)
+        Usage: %timeguessr [diario] [segundos] [rodadas]  (padrão: aleatório, 30, 5)
+        Ex: %tg 45 10 (45 segundos por rodada, 10 rodadas)
         Sem modo, as fotos são sorteadas e não se repetem no servidor;
         "diario" joga o desafio do dia do site.
         O palpite (país e ano) é pelo botão Palpitar de cada foto e só aparece
@@ -469,6 +481,9 @@ class TimeGuessr(commands.Cog):
                 f"e {self.max_round_time} segundos."
             )
             return
+        if not 1 <= rodadas <= MAX_ROUNDS:
+            await ctx.send(f"⚠️ O número de rodadas deve ficar entre 1 e {MAX_ROUNDS}.")
+            return
 
         # Prevent multiple games in the same channel
         if ctx.channel.id in self.active_games:
@@ -481,7 +496,7 @@ class TimeGuessr(commands.Cog):
         try:
             await defer(ctx)
             scope = self.scope_of(ctx)
-            rounds = await self.fetch_rounds(modo, scope)
+            rounds = await self.fetch_rounds(modo, scope, rodadas)
             if rounds is None:
                 await ctx.send("❌ Não consegui buscar os dados do TimeGuessr. Tente novamente mais tarde.")
                 return
@@ -495,19 +510,28 @@ class TimeGuessr(commands.Cog):
             # Per-player total scores across rounds
             scoreboard = defaultdict(int)  # user_id -> total score
 
+            intro = [
+                f"{'📅 Desafio diário' if modo == 'diario' else '🎲 Fotos aleatórias'} — "
+                "o jogo vai começar!",
+                f"**{len(rounds)} {'rodada' if len(rounds) == 1 else 'rodadas'}** — "
+                f"{tempo} segundos cada.",
+            ]
+            if len(rounds) < rodadas:
+                intro.append(
+                    f"ℹ️ O desafio diário tem só {len(rounds)} fotos." if modo == "diario"
+                    else f"ℹ️ Só achei {len(rounds)} fotos novas para esse servidor agora."
+                )
+            intro.append(
+                "\nEm cada foto, clique em **✏️ Palpitar** e diga o país e o ano "
+                "(em português ou inglês, tanto faz). Ninguém vê o seu palpite "
+                "até a resposta.\n"
+                "Depois da primeira rodada, a rodada acaba assim que todo mundo "
+                "que está jogando palpitou."
+            )
             await ctx.send(
                 embed=discord.Embed(
                     title="🌍 TimeGuessr",
-                    description=(
-                        f"{'📅 Desafio diário' if modo == 'diario' else '🎲 Fotos aleatórias'} — "
-                        "o jogo vai começar!\n"
-                        f"**{len(rounds)} rodadas** — {tempo} segundos cada.\n\n"
-                        "Em cada foto, clique em **✏️ Palpitar** e diga o país e o ano "
-                        "(em português ou inglês, tanto faz). Ninguém vê o seu palpite "
-                        "até a resposta.\n"
-                        "Depois da primeira rodada, a rodada acaba assim que todo mundo "
-                        "que está jogando palpitou."
-                    ),
+                    description="\n".join(intro),
                     color=discord.Color.gold(),
                 )
             )
