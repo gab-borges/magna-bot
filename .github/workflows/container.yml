@@ -6,6 +6,10 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  # Weekly rebuild so the image picks up the latest yt-dlp; everything else
+  # stays at the versions pinned in requirements.txt.
+  schedule:
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -27,16 +31,19 @@ jobs:
           # Keep in sync with the Dockerfile base image.
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        # yt-dlp is not pinned; see requirements.in.
+        run: pip install -r requirements.txt yt-dlp
 
       - name: Run tests
         run: python -m unittest -v
 
   publish:
     needs: test
-    # Pull requests only run the tests; images are published from main and tags.
+    # Pull requests only run the tests; images are published from main, tags
+    # and the weekly rebuild.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04-arm
 
@@ -73,5 +80,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            YTDLP_CACHE_BUST=${{ github.run_id }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

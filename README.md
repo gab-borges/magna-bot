@@ -105,8 +105,10 @@ break them (`%tg diario` keeps working then).
 
 1. Install dependencies:
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt yt-dlp
 ```
+`requirements.txt` pins every dependency except yt-dlp, which is installed
+separately so it is always the latest release (see [Dependências](#dependências)).
 
 2. Set up environment variables in `.env`:
 - `TOKEN` - Discord Bot Token
@@ -145,12 +147,36 @@ MAGNA_LIVE_TESTS=1 SPOTIFY_SHORT_LINK=https://spotify.link/... \
   python -m unittest tests.test_spotify_live -v
 ```
 
+## Dependências
+
+`requirements.in` lista as dependências diretas e `requirements.txt` é gerado a
+partir dele com todas as versões fixadas, então um rebuild instala sempre o
+mesmo conjunto de pacotes. A exceção é o yt-dlp: o YouTube quebra versões
+antigas com frequência, por isso ele fica de fora do arquivo gerado e é
+instalado separadamente na versão mais recente, tanto no CI quanto na imagem.
+O rebuild semanal agendado garante que a imagem publicada não fique com um
+yt-dlp antigo mesmo sem novos commits.
+
+Para adicionar uma dependência, edite `requirements.in` e gere o arquivo de
+novo com [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv pip compile requirements.in -o requirements.txt \
+  --universal --python-version 3.11 --no-emit-package yt-dlp
+```
+
+Para atualizar as versões fixadas, rode o mesmo comando com `--upgrade` (tudo)
+ou `--upgrade-package <nome>` (um pacote só) e rode os testes antes de fazer o
+commit.
+
 ## Imagem no Docker Hub
 
 Cada push na branch `main` roda os testes e, se eles passarem, publica
 automaticamente uma imagem ARM64 em `docker.io/gabborges/magna-bot:latest` por
 meio de um runner ARM64 nativo do GitHub Actions. Pull requests rodam apenas os
 testes. O servidor não precisa receber o código-fonte nem fazer o build.
+Toda segunda-feira o workflow também refaz a imagem para pegar a versão mais
+recente do yt-dlp (veja [Dependências](#dependências)).
 
 A imagem inclui FFmpeg para reprodução de áudio. O recurso de renderização
 LaTeX foi removido para evitar centenas de megabytes de dependências adicionais.

@@ -18,6 +18,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# yt-dlp stays out of the lock file so every build takes the latest release.
+# CI passes a new YTDLP_CACHE_BUST on each run, which skips the cached layer.
+ARG YTDLP_CACHE_BUST
+RUN echo "yt-dlp build ${YTDLP_CACHE_BUST}" \
+    && pip install --no-cache-dir --upgrade yt-dlp
+
 # Copy the rest of the application
 COPY . .
 
