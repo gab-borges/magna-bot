@@ -14,7 +14,7 @@ class Admin(commands.Cog):
     @commands.command(hidden=True)
     @commands.is_owner()
     async def sync(self, ctx):
-        """Register the slash commands with Discord again"""
+        """Registra os comandos de barra no Discord de novo"""
         try:
             await sync_commands(self.bot, force=True)
         except discord.HTTPException as e:

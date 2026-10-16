@@ -41,7 +41,7 @@ MIN_DISCORD_DAVE_VERSION = (2, 7, 0)
 
 URL_SCHEME_PATTERN = re.compile(r'^[a-z][a-z0-9+.-]*://', re.IGNORECASE)
 UNSUPPORTED_URL_MESSAGE = (
-    "❌ Only YouTube video links and Spotify track, album and playlist links are supported."
+    "❌ Só aceito links de vídeos do YouTube e de músicas, álbuns e playlists do Spotify."
 )
 # Each queued Spotify track costs a YouTube lookup when its turn comes.
 # Spotify's embed pages list at most 100 tracks anyway, without the total.
@@ -54,7 +54,11 @@ AUTOCOMPLETE_MIN_LENGTH = 2
 AUTOCOMPLETE_CHOICES = 10
 AUTOCOMPLETE_CACHE_SIZE = 128
 CHOICE_NAME_LIMIT = 100
-NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ You need to be in my voice channel to do that."
+NOT_IN_PLAYER_CHANNEL_MESSAGE = "❌ Você precisa estar no meu canal de voz para fazer isso."
+NOT_IN_VOICE_MESSAGE = "Não estou em um canal de voz!"
+NOTHING_PLAYING_MESSAGE = "Nada está tocando!"
+# Typed instead of a number to cancel a search ('cancel' still works).
+CANCEL_WORDS = {'cancelar', 'cancel'}
 # Stream URLs carry their own expiry; stop reusing them a bit before it.
 STREAM_EXPIRY_MARGIN = 300
 # Downloaded fallback tracks kept on disk; older ones are deleted.
@@ -70,9 +74,12 @@ INACTIVITY_DELAYS = {'idle': 300, 'alone': 120}
 VOICE_ACTIVITY_FILE = 'voice_active'
 VOICE_ACTIVITY_INTERVAL = 60
 INACTIVITY_MESSAGES = {
-    'idle': "👋 Left the voice channel since nothing was playing.",
-    'alone': "👋 Left the voice channel since everyone left.",
+    'idle': "👋 Saí do canal de voz porque nada estava tocando.",
+    'alone': "👋 Saí do canal de voz porque todo mundo saiu.",
 }
+
+UNKNOWN_TITLE = 'Título desconhecido'
+
 
 def track_details(info):
     """Pull the title, artist and duration out of yt-dlp's video info."""
@@ -82,7 +89,7 @@ def track_details(info):
         # YouTube Music's auto-generated artist channels.
         artist = artist[:-len(' - Topic')]
     return {
-        'title': info.get('track') or info.get('title') or 'Unknown Title',
+        'title': info.get('track') or info.get('title') or UNKNOWN_TITLE,
         'artist': artist,
         'duration': info.get('duration'),
     }
@@ -99,7 +106,7 @@ def format_duration(seconds):
     return f"{minutes}:{secs:02d}"
 
 
-class Music(commands.Cog):
+class Music(commands.Cog, name="Música"):
     def __init__(self, bot):
         self.bot = bot
         self.voice_clients = {}
@@ -566,7 +573,7 @@ class Music(commands.Cog):
 
         normalized = stream_data.copy()
         normalized['url'] = stream_url.strip()
-        normalized['title'] = normalized.get('title') or 'Unknown Title'
+        normalized['title'] = normalized.get('title') or UNKNOWN_TITLE
         if is_local:
             normalized['is_local'] = True
 
@@ -613,7 +620,7 @@ class Music(commands.Cog):
         return self.normalize_stream_data({
             **details,
             'url': str(downloaded_path),
-            'title': details.get('title') or "Downloaded Song",
+            'title': details.get('title') or "Música baixada",
         }, is_local=True)
 
     async def update_cookies(self):
@@ -675,7 +682,7 @@ class Music(commands.Cog):
             # Check cache first
             cached = await self.get_cached_stream(video_id)
             if cached and self.is_valid_stream_url(cached['url']):
-                stream_data = {**cached, 'title': cached['title'] or 'Unknown Title'}
+                stream_data = {**cached, 'title': cached['title'] or UNKNOWN_TITLE}
             else:
                 if cached:
                     logger.warning(f"Dropping invalid cached stream URL for video {video_id}")
@@ -694,7 +701,7 @@ class Music(commands.Cog):
 
                 # Downloading the track is slower, so it's the last resort.
                 if not stream_data:
-                    await ctx.send("⏳ Trying alternative source...")
+                    await ctx.send("⏳ Tentando outra fonte...")
                     try:
                         stream_data = await self.get_downloaded_stream(video_id, normalized_url)
                     except Exception as e:
@@ -703,7 +710,7 @@ class Music(commands.Cog):
                 stream_data = self.normalize_stream_data(stream_data)
 
                 if not stream_data:
-                    await ctx.send("❌ Unable to play this track. Please try another.")
+                    await ctx.send("❌ Não consegui tocar essa música. Tente outra.")
                     return
 
                 # Cache successful stream URL if it's not a local file
@@ -720,7 +727,7 @@ class Music(commands.Cog):
                     is_local=stream_data.get('is_local', False)
                 )
                 if not stream_data:
-                    await ctx.send("❌ Unable to play this track.")
+                    await ctx.send("❌ Não consegui tocar essa música.")
                     return
 
                 # ffmpeg only opens the URL once playback starts, so an expired
@@ -729,7 +736,7 @@ class Music(commands.Cog):
                 source = discord.FFmpegOpusAudio(stream_data['url'], **self.FFMPEG_OPTIONS)
             except Exception as e:
                 logger.error(f"Error creating audio source: {str(e)}")
-                await ctx.send("❌ Unable to play this track.")
+                await ctx.send("❌ Não consegui tocar essa música.")
                 return
             
             # The queue's "Now Playing" line repeats the same details.
@@ -744,27 +751,27 @@ class Music(commands.Cog):
             
             vc = self.voice_clients[str(ctx.guild.id)]
             if not vc.is_connected():
-                await ctx.send("❌ Voice connection lost.")
+                await ctx.send("❌ A conexão de voz caiu.")
                 return
             
             vc.play(source, after=lambda e: self.after_playback(ctx, e))
             
             embed = discord.Embed(
-                title="🎵 Now Playing",
+                title="🎵 Tocando agora",
                 description=f"**{stream_data['title']}**",
                 color=discord.Color.green()
             )
             if stream_data.get('artist'):
-                embed.add_field(name="Artist", value=stream_data['artist'], inline=True)
+                embed.add_field(name="Artista", value=stream_data['artist'], inline=True)
             duration = format_duration(stream_data.get('duration'))
             if duration:
-                embed.add_field(name="Duration", value=duration, inline=True)
+                embed.add_field(name="Duração", value=duration, inline=True)
             await ctx.send(embed=embed)
             return True
 
         except Exception as e:
             logger.error(f"Play song error: {str(e)}\n{traceback.format_exc()}")
-            await ctx.send("❌ An error occurred while trying to play the track.")
+            await ctx.send("❌ Deu erro ao tentar tocar a música.")
         return False
 
     async def search_youtube(self, query):
@@ -790,8 +797,8 @@ class Music(commands.Cog):
         return [
             {
                 'id': entry.get('id'),
-                'title': entry.get('title', 'Unknown Title'),
-                'duration_string': entry.get('duration_string', 'Unknown'),
+                'title': entry.get('title') or UNKNOWN_TITLE,
+                'duration_string': entry.get('duration_string') or '?',
                 'webpage_url': entry.get('url') or f"https://www.youtube.com/watch?v={entry.get('id')}"
             }
             for entry in (info or {}).get('entries') or []
@@ -898,29 +905,29 @@ class Music(commands.Cog):
     @staticmethod
     def no_match_message(track):
         return (
-            f"⏭️ I couldn't find a reliable match for **{spotify.track_title(track)}** "
-            f"on YouTube, so I skipped it."
+            f"⏭️ Não achei uma versão confiável de **{spotify.track_title(track)}** "
+            f"no YouTube, então pulei essa."
         )
 
     async def play_spotify(self, ctx, vc, reference):
         """Play a Spotify track, or queue every track of an album or playlist."""
         if spotify.is_short_link(reference):
-            await ctx.send("🎵 Resolving Spotify link...")
+            await ctx.send("🎵 Abrindo o link do Spotify...")
             reference = await self.follow_spotify_short_link(reference) or reference
 
         if spotify.entity(reference, spotify.COLLECTION_KINDS):
-            await ctx.send("🎵 Reading Spotify tracks...")
+            await ctx.send("🎵 Lendo as músicas do Spotify...")
             collection = await self.handle_spotify_collection_url(reference)
             if not collection:
-                return await ctx.send("❌ I couldn't read the tracks of this Spotify album or playlist.")
+                return await ctx.send("❌ Não consegui ler as músicas desse álbum ou playlist do Spotify.")
             return await self.enqueue_spotify_collection(ctx, vc, collection)
 
-        await ctx.send("🎵 Resolving Spotify track...")
+        await ctx.send("🎵 Buscando a música do Spotify...")
         track = await self.handle_spotify_url(reference)
         if not track:
             return await ctx.send(
-                "❌ I couldn't read this Spotify track. "
-                "Only track, album and playlist links are supported."
+                "❌ Não consegui ler essa música do Spotify. "
+                "Só aceito links de músicas, álbuns e playlists."
             )
 
         url = await self.find_spotify_match(track)
@@ -929,7 +936,7 @@ class Music(commands.Cog):
 
         title = spotify.track_title(track)
         if await self.play_or_enqueue(ctx, vc, url, title):
-            await ctx.send(f"🎵 Added to queue: **{title}**")
+            await ctx.send(f"🎵 Adicionada à fila: **{title}**")
 
     async def enqueue_spotify_collection(self, ctx, vc, collection):
         """Queue an album's or playlist's tracks and start playing if idle.
@@ -948,13 +955,13 @@ class Music(commands.Cog):
             self.queue.setdefault(guild_id, []).extend(entries)
             idle = not self.is_player_busy(vc)
 
-        message = f"🎵 Added {len(entries)} tracks from **{collection['name']}** to the queue"
+        message = f"🎵 {len(entries)} músicas de **{collection['name']}** adicionadas à fila"
         # Spotify doesn't say how long the playlist really is, so a full
         # page may mean it was cut short.
         if len(collection['tracks']) >= SPOTIFY_COLLECTION_LIMIT:
             message += (
-                f". Only the first {SPOTIFY_COLLECTION_LIMIT} tracks can be read, "
-                f"so any tracks after those weren't added."
+                f". Só consigo ler as primeiras {SPOTIFY_COLLECTION_LIMIT} músicas, "
+                f"então as que vêm depois delas não foram adicionadas."
             )
         await ctx.send(message)
 
@@ -962,14 +969,15 @@ class Music(commands.Cog):
             await self.play_next(ctx)
 
     @commands.hybrid_command()
-    @app_commands.describe(query="A YouTube or Spotify link, or the name of a song to search for")
+    @app_commands.describe(busca="Um link do YouTube ou do Spotify, ou o nome de uma música para buscar")
     @commands.guild_only()
     @commands.cooldown(1, 3, commands.BucketType.user)
-    async def play(self, ctx, *, query: str):
-        """Play a song by URL (YouTube/Spotify) or search term"""
+    async def play(self, ctx, *, busca: str):
+        """Toca uma música por link (YouTube/Spotify) ou por busca"""
+        query = busca
         try:
             if not ctx.author.voice:
-                return await ctx.send("❌ You need to be in a voice channel!", ephemeral=True)
+                return await ctx.send("❌ Você precisa estar em um canal de voz!", ephemeral=True)
 
             guild_id = str(ctx.guild.id)
 
@@ -1024,7 +1032,7 @@ class Music(commands.Cog):
                     entry = await self.play_or_enqueue(ctx, vc, url)
                 except Exception as e:
                     logger.error(f"YouTube playback error: {str(e)}")
-                    await ctx.send("❌ Unable to play this track.")
+                    await ctx.send("❌ Não consegui tocar essa música.")
                     return
 
                 if entry:
@@ -1035,25 +1043,25 @@ class Music(commands.Cog):
                         entry['title'] = (info or {}).get('title') or entry['title']
                     except Exception as e:
                         logger.warning(f"Could not fetch title for queued {url}: {str(e)}")
-                    await ctx.send(f"🎵 Added to queue: **{entry['title']}**")
+                    await ctx.send(f"🎵 Adicionada à fila: **{entry['title']}**")
             else:
-                await ctx.send("🔍 Searching...")
+                await ctx.send("🔍 Buscando...")
                 results = await self.search_youtube(query)
                 if not results:
-                    return await ctx.send("❌ No results found.")
+                    return await ctx.send("❌ Nenhum resultado encontrado.")
 
                 embed = discord.Embed(
-                    title="🔍 Search Results",
-                    description="Type the number (1-10) or 'cancel':",
+                    title="🔍 Resultados da busca",
+                    description=f"Digite o número (1-{len(results)}) ou 'cancelar':",
                     color=discord.Color.blue()
                 )
 
                 for i, entry in enumerate(results, 1):
                     title = entry['title']
-                    duration = entry.get('duration_string', 'Unknown')
+                    duration = entry.get('duration_string') or '?'
                     embed.add_field(
                         name=f"{i}. {title}",
-                        value=f"Duration: {duration}",
+                        value=f"Duração: {duration}",
                         inline=False
                     )
 
@@ -1063,29 +1071,29 @@ class Music(commands.Cog):
                     return (
                         m.author == ctx.author and
                         m.channel == ctx.channel and
-                        (m.content.lower() == 'cancel' or m.content.isdigit() and 1 <= int(m.content) <= len(results))
+                        (m.content.lower() in CANCEL_WORDS or m.content.isdigit() and 1 <= int(m.content) <= len(results))
                     )
 
                 try:
                     msg = await self.bot.wait_for('message', check=check, timeout=30.0)
-                    if msg.content.lower() == 'cancel':
-                        return await ctx.send("❌ Search cancelled.")
+                    if msg.content.lower() in CANCEL_WORDS:
+                        return await ctx.send("❌ Busca cancelada.")
 
                     selected = results[int(msg.content) - 1]
                     if await self.play_or_enqueue(ctx, vc, selected['webpage_url'], selected['title']):
-                        await ctx.send(f"🎵 Added to queue: **{selected['title']}**")
+                        await ctx.send(f"🎵 Adicionada à fila: **{selected['title']}**")
 
                 except asyncio.TimeoutError:
-                    await ctx.send("❌ Search timed out.")
+                    await ctx.send("❌ O tempo para escolher acabou.")
                 except Exception as e:
                     logger.error(f"Search selection error: {str(e)}")
-                    await ctx.send("❌ An error occurred while processing your selection.")
+                    await ctx.send("❌ Deu erro ao processar sua escolha.")
 
         except Exception as e:
             logger.error(f"Play command error: {str(e)}\n{traceback.format_exc()}")
-            await ctx.send("❌ An error occurred while processing your request.")
+            await ctx.send("❌ Deu erro ao processar seu pedido.")
 
-    @play.autocomplete('query')
+    @play.autocomplete('busca')
     async def play_autocomplete(self, interaction, current: str):
         """Suggest songs from YouTube Music while /play's query is typed."""
         query = current.strip()
@@ -1142,12 +1150,12 @@ class Music(commands.Cog):
         limit = CHOICE_NAME_LIMIT - len(suffix)
         if len(details) > limit:
             details = details[:limit - 1] + "…"
-        return (details + suffix) or "Unknown title"
+        return (details + suffix) or UNKNOWN_TITLE
 
     @commands.hybrid_command()
     @commands.guild_only()
     async def stop(self, ctx):
-        """Stop playing and clear the queue"""
+        """Para a música e limpa a fila"""
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
@@ -1160,14 +1168,14 @@ class Music(commands.Cog):
             if self.is_player_busy(vc):
                 self.skip_requested.add(guild_id)
                 vc.stop()
-            await ctx.send("⏹️ Stopped playing and cleared the queue")
+            await ctx.send("⏹️ Parei a música e limpei a fila")
         else:
-            await ctx.send("I'm not in a voice channel!")
+            await ctx.send(NOT_IN_VOICE_MESSAGE)
 
     @commands.hybrid_command()
     @commands.guild_only()
     async def skip(self, ctx):
-        """Skip the current song"""
+        """Pula a música atual"""
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
@@ -1177,25 +1185,25 @@ class Music(commands.Cog):
             if self.is_player_busy(vc):
                 self.skip_requested.add(guild_id)
                 vc.stop()
-                await ctx.send("⏭️ Skipped current song")
+                await ctx.send("⏭️ Música pulada")
             else:
-                await ctx.send("Nothing is playing!")
+                await ctx.send(NOTHING_PLAYING_MESSAGE)
         else:
-            await ctx.send("I'm not in a voice channel!")
+            await ctx.send(NOT_IN_VOICE_MESSAGE)
 
     @commands.hybrid_command()
     @commands.guild_only()
     async def queue(self, ctx):
-        """Show the current queue"""
+        """Mostra a fila atual"""
         guild_id = str(ctx.guild.id)
         if guild_id not in self.queue or not self.queue[guild_id]:
-            return await ctx.send("Queue is empty!")
+            return await ctx.send("A fila está vazia!")
             
-        embed = discord.Embed(title="🎵 Queue", color=discord.Color.blue())
+        embed = discord.Embed(title="🎵 Fila", color=discord.Color.blue())
         
         # Add current song
         if guild_id in self.current_songs:
-            embed.add_field(name="Now Playing", value=self.current_songs[guild_id], inline=False)
+            embed.add_field(name="Tocando agora", value=self.current_songs[guild_id], inline=False)
         
         # Titles are stored when songs are queued, so listing needs no network.
         entries = self.queue[guild_id]
@@ -1203,46 +1211,46 @@ class Music(commands.Cog):
             embed.add_field(name=f"{i}. ", value=entry['title'], inline=False)
         # Embeds hold at most 25 fields, and a playlist can queue far more.
         if len(entries) > QUEUE_DISPLAY_LIMIT:
-            embed.set_footer(text=f"…and {len(entries) - QUEUE_DISPLAY_LIMIT} more")
+            embed.set_footer(text=f"…e mais {len(entries) - QUEUE_DISPLAY_LIMIT}")
 
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="loop")
     @commands.guild_only()
     async def loop_track(self, ctx):
-        """Toggle looping for the current song"""
+        """Liga/desliga a repetição da música atual"""
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
 
         if not self.is_player_busy(vc) or guild_id not in self.current_urls:
-            await ctx.send("Nothing is playing!")
+            await ctx.send(NOTHING_PLAYING_MESSAGE)
             return
 
         if not self.can_control_player(ctx, vc):
             return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE, ephemeral=True)
 
         self.loop_enabled[guild_id] = not self.loop_enabled.get(guild_id, False)
-        status = "enabled" if self.loop_enabled[guild_id] else "disabled"
-        await ctx.send(f"🔁 Loop {status}")
+        status = "ativada" if self.loop_enabled[guild_id] else "desativada"
+        await ctx.send(f"🔁 Repetição {status}")
 
     @commands.hybrid_command()
     @commands.guild_only()
     async def leave(self, ctx):
-        """Leave the voice channel"""
+        """Sai do canal de voz"""
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
             if not self.can_control_player(ctx, vc):
                 return await ctx.send(NOT_IN_PLAYER_CHANNEL_MESSAGE, ephemeral=True)
             await self.leave_voice(ctx.guild)
-            await ctx.send("👋 Left the voice channel")
+            await ctx.send("👋 Saí do canal de voz")
         else:
-            await ctx.send("I'm not in a voice channel!")
+            await ctx.send(NOT_IN_VOICE_MESSAGE)
 
     @commands.hybrid_command()
     @commands.guild_only()
     async def pause(self, ctx):
-        """Pause/Resume the current song"""
+        """Pausa/retoma a música atual"""
         guild_id = str(ctx.guild.id)
         vc = ctx.guild.voice_client or self.voice_clients.get(guild_id)
         if vc:
@@ -1251,14 +1259,14 @@ class Music(commands.Cog):
             self.voice_clients[guild_id] = vc
             if vc.is_playing():
                 vc.pause()
-                await ctx.send("⏸️ Paused")
+                await ctx.send("⏸️ Pausado")
             elif vc.is_paused():
                 vc.resume()
-                await ctx.send("▶️ Resumed")
+                await ctx.send("▶️ Retomado")
             else:
-                await ctx.send("Nothing is playing!")
+                await ctx.send(NOTHING_PLAYING_MESSAGE)
         else:
-            await ctx.send("I'm not in a voice channel!")
+            await ctx.send(NOT_IN_VOICE_MESSAGE)
 
 async def setup(bot):
     await bot.add_cog(Music(bot)) 

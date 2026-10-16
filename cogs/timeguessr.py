@@ -464,8 +464,8 @@ class TimeGuessr(commands.Cog):
         rodadas: int = ROUNDS_PER_GAME,
     ):
         """
-        Start a TimeGuessr game!
-        An image is shown each round and players guess where/when it was taken.
+        Começa um jogo de TimeGuessr!
+        A cada rodada aparece uma foto e os jogadores palpitam onde e quando ela foi tirada.
         Usage: %timeguessr [diario] [segundos] [rodadas]  (padrão: aleatório, 30, 5)
         Ex: %tg 45 10 (45 segundos por rodada, 10 rodadas)
         Sem modo, as fotos são sorteadas e não se repetem no servidor;

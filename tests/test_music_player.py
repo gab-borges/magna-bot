@@ -46,7 +46,7 @@ class PausedPlayerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_play_url_while_paused_queues_instead_of_replacing(self):
         with patch('cogs.music.yt_dlp.YoutubeDL'):
-            await Music.play.callback(self.music, self.ctx, query=VIDEO_URL)
+            await Music.play.callback(self.music, self.ctx, busca=VIDEO_URL)
 
         self.music.play_song.assert_not_awaited()
         self.assertEqual(queued_urls(self.music), [OTHER_URL, VIDEO_URL])
@@ -59,7 +59,7 @@ class PausedPlayerTests(unittest.IsolatedAsyncioTestCase):
             'Message', (), {'content': '1'}
         )())
 
-        await Music.play.callback(self.music, self.ctx, query="some song")
+        await Music.play.callback(self.music, self.ctx, busca="some song")
 
         self.music.play_song.assert_not_awaited()
         self.assertEqual(queued_urls(self.music), [OTHER_URL, VIDEO_URL])
@@ -92,7 +92,7 @@ class VoiceChannelPermissionTests(unittest.IsolatedAsyncioTestCase):
                 self.music.disconnect_voice_client.assert_not_awaited()
                 self.assertEqual(self.music.queue['123'], [OTHER_ENTRY])
                 self.assertFalse(self.music.loop_enabled.get('123'))
-                self.assertIn("voice channel", sent_text(ctx))
+                self.assertIn("canal de voz", sent_text(ctx))
 
     async def test_members_without_voice_cannot_stop_playback(self):
         ctx = self.ctx_for(make_member())
@@ -118,12 +118,12 @@ class VoiceChannelPermissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_play_from_another_channel_does_not_move_a_busy_bot(self):
         ctx = self.ctx_for(make_member(channel=object()))
 
-        await Music.play.callback(self.music, ctx, query=VIDEO_URL)
+        await Music.play.callback(self.music, ctx, busca=VIDEO_URL)
 
         self.music.ensure_voice_client.assert_not_awaited()
         self.music.play_song.assert_not_awaited()
         self.assertEqual(self.music.queue['123'], [OTHER_ENTRY])
-        self.assertIn("voice channel", sent_text(ctx))
+        self.assertIn("canal de voz", sent_text(ctx))
 
     async def test_play_from_another_channel_may_move_an_idle_bot(self):
         idle_vc = make_voice_client(channel=self.bot_channel)
@@ -131,7 +131,7 @@ class VoiceChannelPermissionTests(unittest.IsolatedAsyncioTestCase):
         self.music.ensure_voice_client.return_value = idle_vc
         ctx = make_ctx(author=make_member(channel=object()), voice_client=idle_vc)
 
-        await Music.play.callback(self.music, ctx, query=VIDEO_URL)
+        await Music.play.callback(self.music, ctx, busca=VIDEO_URL)
 
         self.music.ensure_voice_client.assert_awaited_once()
         self.music.play_song.assert_awaited_once_with(ctx, VIDEO_URL)
@@ -157,8 +157,8 @@ class PlaybackSchedulingTests(unittest.IsolatedAsyncioTestCase):
 
         with patch('cogs.music.yt_dlp.YoutubeDL'):
             await asyncio.gather(
-                Music.play.callback(music, ctx, query=VIDEO_URL),
-                Music.play.callback(music, ctx, query=OTHER_URL),
+                Music.play.callback(music, ctx, busca=VIDEO_URL),
+                Music.play.callback(music, ctx, busca=OTHER_URL),
             )
 
         music.play_song.assert_awaited_once()

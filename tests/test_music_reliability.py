@@ -37,11 +37,11 @@ class QueuedTitleLookupTests(unittest.IsolatedAsyncioTestCase):
         music.extract_info = AsyncMock(side_effect=RuntimeError("yt-dlp failed"))
         ctx = make_ctx(author=make_member(channel=channel), voice_client=vc)
 
-        await Music.play.callback(music, ctx, query=VIDEO_URL)
+        await Music.play.callback(music, ctx, busca=VIDEO_URL)
 
         self.assertEqual(music.queue['123'], [{'url': VIDEO_URL, 'title': VIDEO_URL}])
-        self.assertIn("Added to queue", sent_text(ctx))
-        self.assertNotIn("Unable", sent_text(ctx))
+        self.assertIn("Adicionada à fila", sent_text(ctx))
+        self.assertNotIn("Não consegui", sent_text(ctx))
 
 
 class QueueAdvanceTests(unittest.IsolatedAsyncioTestCase):
@@ -220,11 +220,11 @@ class ResolvingTrackTests(unittest.IsolatedAsyncioTestCase):
         async with music.playback_lock('123'):
             # Joining the busy lock instead of refusing would wait forever.
             await asyncio.wait_for(
-                Music.play.callback(music, ctx, query=VIDEO_URL), timeout=1
+                Music.play.callback(music, ctx, busca=VIDEO_URL), timeout=1
             )
 
         music.ensure_voice_client.assert_not_awaited()
-        self.assertIn("voice channel", sent_text(ctx))
+        self.assertIn("canal de voz", sent_text(ctx))
 
 
 if __name__ == "__main__":

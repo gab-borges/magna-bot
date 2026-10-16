@@ -65,7 +65,7 @@ class PlayCommandUrlTests(unittest.IsolatedAsyncioTestCase):
         ctx = make_ctx()
 
         with patch('cogs.music.yt_dlp.YoutubeDL') as youtube_dl:
-            await Music.play.callback(music, ctx, query="http://127.0.0.1:8080/audio.mp3")
+            await Music.play.callback(music, ctx, busca="http://127.0.0.1:8080/audio.mp3")
 
         youtube_dl.assert_not_called()
         music.play_song.assert_not_awaited()
@@ -76,7 +76,7 @@ class PlayCommandUrlTests(unittest.IsolatedAsyncioTestCase):
         music = self.make_music(make_voice_client())
         ctx = make_ctx()
 
-        await Music.play.callback(music, ctx, query=f"https://youtu.be/{VIDEO_ID}?t=3")
+        await Music.play.callback(music, ctx, busca=f"https://youtu.be/{VIDEO_ID}?t=3")
 
         music.play_song.assert_awaited_once_with(ctx, CANONICAL)
 

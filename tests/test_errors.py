@@ -37,12 +37,12 @@ class ErrorHandlerTests(unittest.IsolatedAsyncioTestCase):
         ctx.send.assert_awaited_once_with("⏳ Calma! Tente de novo em 5s.", ephemeral=True)
 
     async def test_missing_argument_shows_usage(self):
-        param = Music.play.clean_params['query']
+        param = Music.play.clean_params['busca']
         ctx = await self.reply_to(commands.MissingRequiredArgument(param))
 
         message = ctx.send.await_args.args[0]
-        self.assertIn("`query`", message)
-        self.assertIn("`%play <query>`", message)
+        self.assertIn("`busca`", message)
+        self.assertIn("`%play <busca>`", message)
 
     async def test_bad_argument_shows_usage(self):
         ctx = await self.reply_to(commands.MemberNotFound("someone"))
@@ -52,7 +52,7 @@ class ErrorHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_permissions_names_them(self):
         ctx = await self.reply_to(commands.MissingPermissions(['administrator']))
 
-        self.assertIn("`Administrator`", ctx.send.await_args.args[0])
+        self.assertIn("`Administrador`", ctx.send.await_args.args[0])
 
     async def test_unexpected_errors_are_logged_with_a_generic_reply(self):
         error = commands.CommandInvokeError(RuntimeError("boom"))

@@ -18,6 +18,7 @@ from cogs.coin import MAX_CHOICES, currency_choices
 from cogs.gemini import QUOTE_LIMIT, quote
 from cogs.music import CHOICE_NAME_LIMIT, NOT_IN_PLAYER_CHANNEL_MESSAGE, Music
 from magna import slash
+from magna.help import HelpCommand
 from tests.music_helpers import make_ctx, make_member, make_music, make_voice_client, sent_text
 from tests.test_gemini import make_client, text_response
 
@@ -92,7 +93,7 @@ async def make_bot():
 
     Call close_bot when done.
     """
-    bot = commands.Bot(command_prefix='%', intents=discord.Intents.all())
+    bot = commands.Bot(command_prefix='%', intents=discord.Intents.all(), help_command=HelpCommand())
     # Loading an extension imports its module again; keep the modules the
     # other tests imported (and patch) in place.
     bot.saved_modules = {name: module for name, module in sys.modules.items() if name.startswith('cogs.')}
@@ -241,8 +242,8 @@ class CommandTreeTests(BotTestCase):
             payload = self.bot.tree.get_command(name).to_dict(self.bot.tree)
             return {entry['name'] for entry in payload['options'] if entry.get('autocomplete')}
 
-        self.assertEqual(autocompleted('play'), {'query'})
-        self.assertEqual(autocompleted('coin'), {'from_currency', 'to_currency'})
+        self.assertEqual(autocompleted('play'), {'busca'})
+        self.assertEqual(autocompleted('coin'), {'de', 'para'})
 
     def test_birthday_subcommands(self):
         group = self.bot.tree.get_command('birthday')
@@ -263,20 +264,20 @@ class InteractionTests(BotTestCase):
         calls = await self.run_slash('hello')
 
         self.assertEqual(calls, [('response', {
-            'type': CHANNEL_MESSAGE, 'data': {'tts': False, 'content': f"Hello there, <@{USER_ID}>!"},
+            'type': CHANNEL_MESSAGE, 'data': {'tts': False, 'content': f"Olá, <@{USER_ID}>!"},
         })])
 
     async def test_roll_takes_its_expression_as_an_option(self):
-        calls = await self.run_slash('roll', option('dice_expression', '2d6+1'))
+        calls = await self.run_slash('roll', option('dados', '2d6+1'))
 
         (kind, payload), = calls
         embed = payload['data']['embeds'][0]
         self.assertEqual(payload['type'], CHANNEL_MESSAGE)
-        self.assertEqual(embed['fields'][0]['name'], '2d6 rolls')
-        self.assertEqual(embed['fields'][1], {'name': 'Modifier', 'value': '+1', 'inline': False})
+        self.assertEqual(embed['fields'][0]['name'], '2d6')
+        self.assertEqual(embed['fields'][1], {'name': 'Modificador', 'value': '+1', 'inline': False})
 
     async def test_server_commands_explain_themselves_in_dms_only_to_the_user(self):
-        calls = await self.run_slash('play', option('query', 'never gonna give you up'))
+        calls = await self.run_slash('play', option('busca', 'never gonna give you up'))
 
         (kind, payload), = calls
         self.assertEqual(payload['type'], CHANNEL_MESSAGE)
@@ -286,44 +287,44 @@ class InteractionTests(BotTestCase):
     async def test_slow_commands_defer_before_answering(self):
         with patch('cogs.coin.aiohttp.ClientSession', side_effect=aiohttp.ClientError):
             calls = await self.run_slash(
-                'coin', option('amount', 5, kind=10),
-                option('from_currency', 'brl'), option('to_currency', 'usd'),
+                'coin', option('valor', 5, kind=10),
+                option('de', 'brl'), option('para', 'usd'),
             )
 
         self.assertEqual(calls[0], ('response', {'type': DEFERRED_CHANNEL_MESSAGE}))
         self.assertEqual(calls[1][0], 'followup')
-        self.assertIn("exchange rate service", calls[1][1]['content'])
+        self.assertIn("serviço de cotações", calls[1][1]['content'])
 
     async def test_invalid_input_answers_without_deferring(self):
         calls = await self.run_slash(
-            'coin', option('amount', 5, kind=10),
-            option('from_currency', 'reais'), option('to_currency', 'usd'),
+            'coin', option('valor', 5, kind=10),
+            option('de', 'reais'), option('para', 'usd'),
         )
 
         self.assertEqual(calls[0][1]['type'], CHANNEL_MESSAGE)
-        self.assertIn("isn't a currency code", calls[0][1]['data']['content'])
+        self.assertIn("não é um código de moeda", calls[0][1]['data']['content'])
 
     async def test_ask_quotes_the_question_above_the_answer(self):
-        self.bot.get_cog('Gemini').client = make_client(text_response("Eu sou o Magna!"))
+        self.bot.get_cog('IA').client = make_client(text_response("Eu sou o Magna!"))
 
-        calls = await self.run_slash('ask', option('question', 'Quem é você?'))
+        calls = await self.run_slash('ask', option('pergunta', 'Quem é você?'))
 
         self.assertEqual(calls[0], ('response', {'type': DEFERRED_CHANNEL_MESSAGE}))
         self.assertEqual(self.adapter.contents(), ["> Quem é você?\n\nEu sou o Magna!"])
 
     async def test_ask_never_pings_through_the_quoted_question(self):
-        self.bot.get_cog('Gemini').client = make_client(text_response("ok"))
+        self.bot.get_cog('IA').client = make_client(text_response("ok"))
 
-        calls = await self.run_slash('ask', option('question', '@everyone olha isso'))
+        calls = await self.run_slash('ask', option('pergunta', '@everyone olha isso'))
 
         self.assertEqual(calls[-1][1]['allowed_mentions'], {'parse': []})
 
     async def test_cooldowns_are_reported_only_to_the_user(self):
-        self.bot.get_cog('Gemini').client = make_client(text_response("ok"))
+        self.bot.get_cog('IA').client = make_client(text_response("ok"))
 
-        await self.run_slash('ask', option('question', 'oi'))
+        await self.run_slash('ask', option('pergunta', 'oi'))
         self.adapter.calls.clear()
-        calls = await self.run_slash('ask', option('question', 'oi de novo'))
+        calls = await self.run_slash('ask', option('pergunta', 'oi de novo'))
 
         (kind, payload), = calls
         self.assertEqual(payload['data']['flags'], EPHEMERAL)
@@ -340,16 +341,16 @@ class InteractionTests(BotTestCase):
             calls = await self.run_slash('hello', expired=True)
 
         self.assertEqual(calls, [])
-        self.assertEqual(channel_send.await_args.kwargs['content'], f"Hello there, <@{USER_ID}>!")
+        self.assertEqual(channel_send.await_args.kwargs['content'], f"Olá, <@{USER_ID}>!")
 
     async def test_play_suggests_songs_while_typing(self):
-        music = self.bot.get_cog('Music')
+        music = self.bot.get_cog('Música')
         music.ytmusic_candidates = AsyncMock(return_value=[
             {'video_id': 'dQw4w9WgXcQ', 'title': 'Never Gonna Give You Up',
              'artists': ['Rick Astley'], 'duration': 213},
         ])
 
-        calls = await self.run_slash('play', option('query', 'never gonna', focused=True), kind=4)
+        calls = await self.run_slash('play', option('busca', 'never gonna', focused=True), kind=4)
 
         self.assertEqual(calls, [('response', {'type': AUTOCOMPLETE_RESULT, 'data': {'choices': [{
             'name': 'Never Gonna Give You Up — Rick Astley (3:33)',
@@ -368,11 +369,11 @@ class InteractionTests(BotTestCase):
 
     async def test_coin_suggests_currencies_while_typing(self):
         calls = await self.run_slash(
-            'coin', option('amount', 5, kind=10), option('from_currency', 'real', focused=True), kind=4,
+            'coin', option('valor', 5, kind=10), option('de', 'real', focused=True), kind=4,
         )
 
         choices = calls[0][1]['data']['choices']
-        self.assertEqual(choices, [{'name': 'BRL — Brazilian Real', 'value': 'BRL'}])
+        self.assertEqual(choices, [{'name': 'BRL — Real brasileiro', 'value': 'BRL'}])
 
 
 class PrefixTests(BotTestCase):
@@ -396,7 +397,7 @@ class PrefixTests(BotTestCase):
         for content in ('%hello', '%hi'):
             with self.subTest(content=content):
                 send = await self.run_prefix(content)
-                self.assertEqual(send.await_args.kwargs['content'], f"Hello there, <@{USER_ID}>!")
+                self.assertEqual(send.await_args.kwargs['content'], f"Olá, <@{USER_ID}>!")
 
     async def test_rest_of_the_message_is_one_argument(self):
         send = await self.run_prefix('%roll 2d6 + 1')
@@ -409,6 +410,26 @@ class PrefixTests(BotTestCase):
 
         self.assertIn("só funciona em servidores", send.await_args.kwargs['content'])
         self.assertEqual(self.adapter.calls, [])
+
+    async def test_help_is_in_portuguese(self):
+        send = await self.run_prefix('%help')
+        text = "\n".join(call.args[0] for call in send.await_args_list)
+
+        self.assertIn("Dados:", text)
+        self.assertIn("Mostra esta mensagem", text)
+        self.assertIn("Digite %help <comando>", text)
+
+    async def test_help_for_a_command_shows_its_arguments_in_portuguese(self):
+        send = await self.run_prefix('%help timeguessr')
+        text = "\n".join(call.args[0] for call in send.await_args_list)
+
+        self.assertIn("Argumentos:", text)
+        self.assertIn("(padrão: 30)", text)
+
+    async def test_help_for_an_unknown_command(self):
+        send = await self.run_prefix('%help nada')
+
+        self.assertEqual(send.await_args.args[0], 'Nenhum comando chamado "nada" foi encontrado.')
 
 
 class TimeGuessrButtonTests(BotTestCase):
@@ -548,7 +569,7 @@ class MusicReplyTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(command=command.name):
                 ctx = make_ctx()
                 await command.callback(make_music(), ctx)
-                self.assertEqual(sent_text(ctx), "I'm not in a voice channel!")
+                self.assertEqual(sent_text(ctx), "Não estou em um canal de voz!")
 
     async def test_listeners_elsewhere_are_refused_privately(self):
         vc = make_voice_client(playing=True, channel=object())
@@ -564,9 +585,9 @@ class MusicReplyTests(unittest.IsolatedAsyncioTestCase):
         ctx = make_ctx(author=make_member())
         ctx.interaction = SimpleNamespace(response=response)
 
-        await Music.play.callback(make_music(), ctx, query='song')
+        await Music.play.callback(make_music(), ctx, busca='song')
 
-        ctx.send.assert_awaited_once_with("❌ You need to be in a voice channel!", ephemeral=True)
+        ctx.send.assert_awaited_once_with("❌ Você precisa estar em um canal de voz!", ephemeral=True)
         response.defer.assert_not_awaited()
 
     async def test_play_defers_before_joining_the_channel(self):
@@ -577,10 +598,10 @@ class MusicReplyTests(unittest.IsolatedAsyncioTestCase):
         music.ensure_voice_client = AsyncMock(side_effect=lambda ctx: response.defer.assert_awaited_once())
         music.search_youtube = AsyncMock(return_value=[])
 
-        await Music.play.callback(music, ctx, query='song')
+        await Music.play.callback(music, ctx, busca='song')
 
         music.ensure_voice_client.assert_awaited_once()
-        self.assertIn("No results found", sent_text(ctx))
+        self.assertIn("Nenhum resultado encontrado", sent_text(ctx))
 
 
 class DeferTests(unittest.IsolatedAsyncioTestCase):
@@ -669,6 +690,10 @@ class SmallHelperTests(unittest.TestCase):
         self.assertEqual([c.value for c in currency_choices('usd')], ['USD'])
         self.assertEqual([c.value for c in currency_choices('Real')], ['BRL'])
         self.assertIn('ARS', [c.value for c in currency_choices('peso')])
+
+    def test_currency_suggestions_ignore_accents(self):
+        self.assertIn('USD', [c.value for c in currency_choices('dolar')])
+        self.assertIn('CHF', [c.value for c in currency_choices('SUÍÇO')])
 
     def test_currency_suggestions_fit_discords_limit(self):
         choices = currency_choices('')

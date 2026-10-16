@@ -105,8 +105,8 @@ class BirthdayHelpTests(unittest.IsolatedAsyncioTestCase):
 
         await Birthday.birthday.callback(Birthday.__new__(Birthday), ctx)
 
-        self.assertIn("%birthday add <member> <dd-mm>", sent_text(ctx))
-        self.assertIn("%birthday remove <member>", sent_text(ctx))
+        self.assertIn("%birthday add <membro> <dd-mm>", sent_text(ctx))
+        self.assertIn("%birthday remove <membro>", sent_text(ctx))
 
 
 class BirthdayAnnouncementTests(TempDataDirMixin, unittest.IsolatedAsyncioTestCase):
@@ -189,7 +189,7 @@ class BirthdayListTests(unittest.IsolatedAsyncioTestCase):
         embed = await self.list_embed(birthdays, datetime.date(2027, 6, 12))
 
         self.assertEqual(len(embed.fields), EMBED_FIELD_LIMIT)
-        self.assertEqual(embed.footer.text, "…and 3 more")
+        self.assertEqual(embed.footer.text, "…e mais 3")
 
 
 class MemberCountTests(TempDataDirMixin, unittest.IsolatedAsyncioTestCase):
@@ -269,7 +269,7 @@ class MemeTests(unittest.IsolatedAsyncioTestCase):
 
         embed = await self.meme(cog, self.make_ctx())
 
-        self.assertIn("u/[deleted]", embed.footer.text)
+        self.assertIn("u/[excluído]", embed.footer.text)
 
     async def test_long_titles_fit_in_the_embed(self):
         cog = self.make_cog([make_post(title="x" * 300)])
@@ -292,7 +292,7 @@ class MemeTests(unittest.IsolatedAsyncioTestCase):
         embed = await self.meme(cog, ctx)
 
         self.assertIsNone(embed)
-        self.assertIn("Couldn't find a meme", sent_text(ctx))
+        self.assertIn("Não consegui encontrar um meme", sent_text(ctx))
 
     async def test_nsfw_posts_are_allowed_in_nsfw_channels(self):
         cog = self.make_cog([make_post(over_18=True)])
@@ -309,7 +309,7 @@ class MemeTests(unittest.IsolatedAsyncioTestCase):
 
         await Reddit.meme.callback(cog, ctx)
 
-        self.assertIn("Reddit API credentials", sent_text(ctx))
+        self.assertIn("credenciais da API do Reddit", sent_text(ctx))
         await cog.cog_unload()
 
 
@@ -339,7 +339,7 @@ class RollCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_total_includes_the_negative_modifier(self):
         ctx = SimpleNamespace(send=AsyncMock())
         with patch('cogs.roll.random.randint', return_value=10):
-            await Roll.roll.callback(Roll(bot=None), ctx, dice_expression="1d20-2")
+            await Roll.roll.callback(Roll(bot=None), ctx, dados="1d20-2")
 
         embed = ctx.send.await_args.kwargs['embed']
         self.assertEqual(embed.fields[-1].value, "8")
@@ -347,9 +347,9 @@ class RollCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_expressions_get_a_friendly_message(self):
         ctx = SimpleNamespace(send=AsyncMock())
 
-        await Roll.roll.callback(Roll(bot=None), ctx, dice_expression="abc")
+        await Roll.roll.callback(Roll(bot=None), ctx, dados="abc")
 
-        self.assertIn("Invalid dice format", sent_text(ctx))
+        self.assertIn("Formato de dados inválido", sent_text(ctx))
 
 
 class FakeHTTPSession:
@@ -398,9 +398,11 @@ class CoinTests(unittest.IsolatedAsyncioTestCase):
     async def test_converts_with_the_fetched_rate(self):
         session = FakeHTTPSession(json_data={'rates': {'USD': 0.2}})
 
-        ctx = await self.convert(session, 5.0, "brl", "usd")
+        ctx = await self.convert(session, 6000.0, "brl", "usd")
 
-        self.assertIn("**1.00 USD**", ctx.send.await_args.kwargs['embed'].description)
+        embed = ctx.send.await_args.kwargs['embed']
+        self.assertEqual(embed.description, "6.000,00 BRL = **1.200,00 USD**")
+        self.assertEqual(embed.fields[0].value, "1 BRL = 0,200000 USD")
 
     async def test_network_errors_get_a_friendly_message_without_details(self):
         session = FakeHTTPSession(error=aiohttp.ClientConnectionError("10.0.0.1 refused"))
@@ -408,7 +410,7 @@ class CoinTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs('cogs.coin', level='ERROR'):
             ctx = await self.convert(session, 5.0, "BRL", "USD")
 
-        self.assertIn("isn't responding", sent_text(ctx))
+        self.assertIn("não está respondendo", sent_text(ctx))
         self.assertNotIn("10.0.0.1", sent_text(ctx))
 
     async def test_currency_codes_are_validated_before_any_request(self):
@@ -417,7 +419,7 @@ class CoinTests(unittest.IsolatedAsyncioTestCase):
         ctx = await self.convert(session, 5.0, "../x", "USD")
 
         self.assertEqual(session.urls, [])
-        self.assertIn("isn't a currency code", sent_text(ctx))
+        self.assertIn("não é um código de moeda", sent_text(ctx))
 
 
 if __name__ == "__main__":

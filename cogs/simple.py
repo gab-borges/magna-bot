@@ -2,25 +2,25 @@ from discord.ext import commands
 
 # > Simple Commands <
 
-class Simple(commands.Cog):
+class Simple(commands.Cog, name="Básicos"):
     def __init__(self, bot):
         self.bot = bot
 
     # Commands
     @commands.hybrid_command(aliases=["hi", "howdy", "hey"])
     async def hello(self, ctx):
-        """Say hello to Magna"""
-        await ctx.send(f"Hello there, {ctx.author.mention}!")
+        """Diz oi para o Magna"""
+        await ctx.send(f"Olá, {ctx.author.mention}!")
 
     @commands.hybrid_command(name="morning")
     async def goodmorning(self, ctx):
-        """Wish everyone a good morning"""
-        await ctx.send(f"Good morning, {ctx.author.mention}!")
+        """Deseja bom dia a todos"""
+        await ctx.send(f"Bom dia, {ctx.author.mention}!")
     
     @commands.hybrid_command(name="ping")
     async def ping(self, ctx):
-        """Show the bot's latency"""
-        await ctx.send(f":ping_pong:  {self.bot.user.name}'s Latency: {round(self.bot.latency * 1000)}ms")
+        """Mostra a latência do bot"""
+        await ctx.send(f":ping_pong:  Latência do {self.bot.user.name}: {round(self.bot.latency * 1000)}ms")
 
     '''
     # Embedded Message, Test
