@@ -129,6 +129,7 @@ sudo pacman -S ffmpeg
 ```bash
 python main.py
 ```
+Birthdays, member counts and the other saved data go to `./data` (set `DATA_DIR` to use another directory).
 
 5. Run the tests:
 ```bash

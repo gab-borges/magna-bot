@@ -11,6 +11,7 @@ __pycache__
 # Country names and coordinates used by TimeGuessr.
 !magna/countries.json
 temp_audio/
+data/
 .private/
 *.log
 cookies.txt
