@@ -4,7 +4,9 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import logging
+import math
 import re
+import time
 
 from magna.slash import defer
 
@@ -47,6 +49,13 @@ COMMON_CURRENCIES = {
 }
 # Discord shows at most this many autocomplete suggestions.
 MAX_CHOICES = 25
+# Rates are reused this many seconds before asking the API again.
+RATES_TTL = 5 * 60
+
+
+def format_number(value, decimals=2):
+    """Write a number the Brazilian way: 1234.5 becomes 1.234,50."""
+    return f"{value:,.{decimals}f}".translate(str.maketrans(',.', '.,'))
 
 
 def currency_choices(current):
@@ -63,7 +72,30 @@ class CoinConverter(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.api_url = "https://api.exchangerate-api.com/v4/latest/"
-    
+        # Base currency -> (time.monotonic() when fetched, rates)
+        self.rates_cache = {}
+
+    async def fetch_rates(self, base):
+        """Rates from `base` to every currency, or None if the API refused.
+
+        Each base is fetched at most once every RATES_TTL seconds.
+        """
+        cached = self.rates_cache.get(base)
+        if cached and time.monotonic() - cached[0] < RATES_TTL:
+            return cached[1]
+
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+            async with session.get(f"{self.api_url}{base}") as response:
+                if response.status != 200:
+                    return None
+                data = await response.json()
+
+        rates = data.get("rates") if isinstance(data, dict) else None
+        if not rates:
+            return {}
+        self.rates_cache[base] = (time.monotonic(), rates)
+        return rates
+
     @commands.hybrid_command(name="coin")
     @app_commands.describe(
         amount="How much money to convert",
@@ -86,36 +118,41 @@ class CoinConverter(commands.Cog):
                 await ctx.send(f"Error: `{code}` isn't a currency code (use 3 letters, like BRL).")
                 return
 
+        # float() also reads "nan" and "inf".
+        if not math.isfinite(amount) or amount <= 0:
+            await ctx.send("Error: The amount must be a positive number.")
+            return
+
         # Fetch exchange rates from API
         await defer(ctx)
         try:
-            async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-                async with session.get(f"{self.api_url}{from_currency}") as response:
-                    if response.status != 200:
-                        await ctx.send(f"Error: Couldn't fetch exchange rates for {from_currency}.")
-                        return
-
-                    data = await response.json()
+            rates = await self.fetch_rates(from_currency)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             logger.exception("Could not fetch exchange rates for %s", from_currency)
             await ctx.send("Error: The exchange rate service isn't responding. Try again later.")
             return
 
-        if "rates" not in data or to_currency not in data["rates"]:
+        if rates is None:
+            await ctx.send(f"Error: Couldn't fetch exchange rates for {from_currency}.")
+            return
+        if to_currency not in rates:
             await ctx.send(f"Error: Currency {to_currency} not found in exchange rates.")
             return
 
         # Get exchange rate and calculate converted amount
-        exchange_rate = data["rates"][to_currency]
+        exchange_rate = rates[to_currency]
         converted_amount = amount * exchange_rate
 
         # Create and send an embedded message with the result
         embed = discord.Embed(
             title="Currency Conversion",
-            description=f"{amount:.2f} {from_currency} = **{converted_amount:.2f} {to_currency}**",
+            description=(
+                f"{format_number(amount)} {from_currency} = "
+                f"**{format_number(converted_amount)} {to_currency}**"
+            ),
             color=discord.Color.green()
         )
-        embed.add_field(name="Exchange Rate", value=f"1 {from_currency} = {exchange_rate:.6f} {to_currency}", inline=False)
+        embed.add_field(name="Exchange Rate", value=f"1 {from_currency} = {format_number(exchange_rate, 6)} {to_currency}", inline=False)
 
         await ctx.send(embed=embed)
 
