@@ -176,7 +176,13 @@ automaticamente uma imagem ARM64 em `docker.io/gabborges/magna-bot:latest` por
 meio de um runner ARM64 nativo do GitHub Actions. Pull requests rodam apenas os
 testes. O servidor não precisa receber o código-fonte nem fazer o build.
 Toda segunda-feira o workflow também refaz a imagem para pegar a versão mais
-recente do yt-dlp (veja [Dependências](#dependências)).
+recente do yt-dlp (veja [Dependências](#dependências)). Esse rebuild recebe
+também uma tag com a data, como `weekly-20261019`.
+
+Se uma versão nova do yt-dlp quebrar alguma coisa, recrie o container com a
+tag da semana anterior no lugar de `latest` até sair uma correção. Lembre de
+desativar a atualização automática enquanto isso, ou ela volta para a
+`latest`. As tags disponíveis aparecem na página do repositório no Docker Hub.
 
 A imagem inclui FFmpeg para reprodução de áudio. O recurso de renderização
 LaTeX foi removido para evitar centenas de megabytes de dependências adicionais.

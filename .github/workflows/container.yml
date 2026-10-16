@@ -69,6 +69,9 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha
+            # The weekly rebuild overwrites the sha tag of an unchanged commit,
+            # so it also gets a dated tag to roll back to.
+            type=schedule,prefix=weekly-,pattern={{date 'YYYYMMDD'}}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
