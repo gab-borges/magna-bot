@@ -7,7 +7,7 @@ on:
   pull_request:
   workflow_dispatch:
   # Weekly rebuild so the image picks up the latest yt-dlp; everything else
-  # stays at the versions pinned in requirements.txt.
+  # stays at the versions pinned in requirements.lock.
   schedule:
     - cron: "17 6 * * 1"
 
@@ -31,11 +31,12 @@ jobs:
           # Keep in sync with the Dockerfile base image.
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.lock
+            requirements.txt
 
       - name: Install dependencies
-        # yt-dlp is not pinned; see requirements.in.
-        run: pip install -r requirements.txt yt-dlp
+        run: pip install -r requirements.txt
 
       - name: Run tests
         run: python -m unittest -v

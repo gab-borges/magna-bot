@@ -105,10 +105,10 @@ break them (`%tg diario` keeps working then).
 
 1. Install dependencies:
 ```bash
-pip install -r requirements.txt yt-dlp
+pip install -r requirements.txt
 ```
-`requirements.txt` pins every dependency except yt-dlp, which is installed
-separately so it is always the latest release (see [Dependências](#dependências)).
+Every dependency is pinned except yt-dlp, which always installs the latest
+release (see [Dependências](#dependências)).
 
 2. Set up environment variables in `.env`:
 - `TOKEN` - Discord Bot Token
@@ -149,19 +149,26 @@ MAGNA_LIVE_TESTS=1 SPOTIFY_SHORT_LINK=https://spotify.link/... \
 
 ## Dependências
 
-`requirements.in` lista as dependências diretas e `requirements.txt` é gerado a
-partir dele com todas as versões fixadas, então um rebuild instala sempre o
-mesmo conjunto de pacotes. A exceção é o yt-dlp: o YouTube quebra versões
-antigas com frequência, por isso ele fica de fora do arquivo gerado e é
-instalado separadamente na versão mais recente, tanto no CI quanto na imagem.
-O rebuild semanal agendado garante que a imagem publicada não fique com um
-yt-dlp antigo mesmo sem novos commits.
+As dependências ficam em três arquivos:
 
-Para adicionar uma dependência, edite `requirements.in` e gere o arquivo de
-novo com [uv](https://docs.astral.sh/uv/):
+- `requirements.in`: as dependências diretas, editado à mão.
+- `requirements.lock`: gerado a partir do `requirements.in`, com todas as
+  versões fixadas, então um rebuild instala sempre o mesmo conjunto de pacotes.
+  O yt-dlp fica de fora.
+- `requirements.txt`: editado à mão, inclui o `requirements.lock` e adiciona o
+  yt-dlp sem versão. É o arquivo usado para instalar.
+
+O yt-dlp é a exceção porque o YouTube quebra versões antigas com frequência:
+toda instalação, no CI e na imagem, pega a versão mais recente dele. O rebuild
+semanal agendado garante que a imagem publicada não fique com um yt-dlp antigo
+mesmo sem novos commits. Numa instalação local que já tem o yt-dlp, atualize
+com `pip install --upgrade -r requirements.txt`.
+
+Para adicionar uma dependência, edite `requirements.in` e gere o lock de novo
+com [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv pip compile requirements.in -o requirements.txt \
+uv pip compile requirements.in -o requirements.lock \
   --universal --python-version 3.11 --no-emit-package yt-dlp
 ```
 
