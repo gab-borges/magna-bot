@@ -28,11 +28,23 @@ class MagnaBot(commands.Bot):
 
 
 # Bot creation: Prefix Definition and Intents (to specify the events the bot will listen to)
+# Only the events the cogs use: messages for %commands (and their text, a
+# privileged intent), reactions for TimeGuessr's ✅, members for birthdays and
+# member counts (privileged), voice states for music. guilds fills the cache
+# everything else relies on.
+intents = discord.Intents.none()
+intents.guilds = True
+intents.messages = True
+intents.message_content = True
+intents.reactions = True
+intents.members = True
+intents.voice_states = True
+
 # Text from outside (Gemini answers, video titles) goes into messages, so it
 # must never be able to ping @everyone, @here or a role.
 bot = MagnaBot(
     command_prefix="%",
-    intents=discord.Intents.all(),
+    intents=intents,
     allowed_mentions=discord.AllowedMentions(everyone=False, roles=False),
 )
 

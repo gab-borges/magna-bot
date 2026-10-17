@@ -45,6 +45,14 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(path, str(target / 'birthdays.json'))
         self.assertTrue(target.is_dir())
 
+    def test_data_files_default_to_a_data_directory(self):
+        env = {key: value for key, value in os.environ.items() if key != 'DATA_DIR'}
+        with patch.dict(os.environ, env, clear=True), patch('magna.storage.os.makedirs') as makedirs:
+            path = data_file('voice_active')
+
+        self.assertEqual(path, os.path.join('data', 'voice_active'))
+        makedirs.assert_called_once_with('data', exist_ok=True)
+
     def test_writes_plain_json(self):
         save_json(self.path, {'x': [1, 2]})
 
