@@ -6,6 +6,10 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  # Weekly rebuild so the image picks up the latest yt-dlp; everything else
+  # stays at the versions pinned in requirements.lock.
+  schedule:
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -27,6 +31,9 @@ jobs:
           # Keep in sync with the Dockerfile base image.
           python-version: "3.11"
           cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements.txt
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -36,7 +43,8 @@ jobs:
 
   publish:
     needs: test
-    # Pull requests only run the tests; images are published from main and tags.
+    # Pull requests only run the tests; images are published from main, tags
+    # and the weekly rebuild.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04-arm
 
@@ -62,6 +70,9 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=sha
+            # The weekly rebuild overwrites the sha tag of an unchanged commit,
+            # so it also gets a dated tag to roll back to.
+            type=schedule,prefix=weekly-,pattern={{date 'YYYYMMDD'}}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
@@ -73,5 +84,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            YTDLP_CACHE_BUST=${{ github.run_id }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

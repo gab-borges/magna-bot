@@ -1,0 +1,12 @@
+# Direct dependencies. requirements.lock is generated from this file; see the
+# "Dependências" section of the README for how to update it.
+discord.py[voice]>=2.7.1
+aiohttp
+asyncpraw
+google-genai
+tzdata
+# Left out of requirements.lock and installed unpinned by requirements.txt.
+yt-dlp
+beautifulsoup4
+python-dotenv
+ytmusicapi

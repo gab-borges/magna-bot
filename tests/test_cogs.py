@@ -14,7 +14,7 @@ from discord.ext import commands
 from cogs.birthday import (
     EMBED_FIELD_LIMIT, MIDNIGHT, TIMEZONE, Birthday, days_until, is_birthday, parse_birthday,
 )
-from cogs.coin import CoinConverter
+from cogs.coin import RATES_TTL, CoinConverter, format_number
 from cogs.membercount import MemberCount
 from cogs.music import Music
 from cogs.reddit import EMBED_TITLE_LIMIT, Reddit
@@ -389,20 +389,66 @@ class FakeHTTPSession:
 
 
 class CoinTests(unittest.IsolatedAsyncioTestCase):
-    async def convert(self, session, *args):
+    async def convert(self, session, *args, cog=None):
         ctx = SimpleNamespace(send=AsyncMock())
         with patch('cogs.coin.aiohttp.ClientSession', return_value=session):
-            await CoinConverter.coin_convert.callback(CoinConverter(bot=None), ctx, *args)
+            await CoinConverter.coin_convert.callback(cog or CoinConverter(bot=None), ctx, *args)
         return ctx
 
     async def test_converts_with_the_fetched_rate(self):
         session = FakeHTTPSession(json_data={'rates': {'USD': 0.2}})
 
-        ctx = await self.convert(session, 6000.0, "brl", "usd")
+        ctx = await self.convert(session, 5.0, "brl", "usd")
+
+        self.assertIn("**1,00 USD**", ctx.send.await_args.kwargs['embed'].description)
+
+    def test_numbers_are_written_the_brazilian_way(self):
+        self.assertEqual(format_number(1234.5), "1.234,50")
+        self.assertEqual(format_number(1234567.891), "1.234.567,89")
+        self.assertEqual(format_number(0.183456, 6), "0,183456")
+
+    async def test_large_amounts_use_brazilian_separators(self):
+        session = FakeHTTPSession(json_data={'rates': {'BRL': 5.0}})
+
+        ctx = await self.convert(session, 1000.0, "USD", "BRL")
 
         embed = ctx.send.await_args.kwargs['embed']
-        self.assertEqual(embed.description, "6.000,00 BRL = **1.200,00 USD**")
-        self.assertEqual(embed.fields[0].value, "1 BRL = 0,200000 USD")
+        self.assertEqual(embed.description, "1.000,00 USD = **5.000,00 BRL**")
+        self.assertEqual(embed.fields[0].value, "1 USD = 5,000000 BRL")
+
+    async def test_amounts_that_are_not_positive_are_refused_before_any_request(self):
+        for amount in (-10.0, 0.0, float('nan'), float('inf')):
+            with self.subTest(amount=amount):
+                session = FakeHTTPSession()
+
+                ctx = await self.convert(session, amount, "BRL", "USD")
+
+                self.assertEqual(session.urls, [])
+                self.assertIn("precisa ser um número positivo", sent_text(ctx))
+
+    async def test_rates_are_reused_for_a_few_minutes(self):
+        cog = CoinConverter(bot=None)
+        session = FakeHTTPSession(json_data={'rates': {'USD': 0.2, 'EUR': 0.18}})
+
+        with patch('cogs.coin.time.monotonic', return_value=1000.0):
+            await self.convert(session, 5.0, "BRL", "USD", cog=cog)
+            await self.convert(session, 5.0, "BRL", "EUR", cog=cog)
+        self.assertEqual(len(session.urls), 1)
+
+        with patch('cogs.coin.time.monotonic', return_value=1000.0 + RATES_TTL):
+            await self.convert(session, 5.0, "BRL", "USD", cog=cog)
+        self.assertEqual(len(session.urls), 2)
+
+    async def test_failed_fetches_are_not_cached(self):
+        cog = CoinConverter(bot=None)
+
+        with self.assertLogs('cogs.coin', level='ERROR'):
+            await self.convert(FakeHTTPSession(error=aiohttp.ClientConnectionError()), 5.0, "BRL", "USD", cog=cog)
+        session = FakeHTTPSession(json_data={'rates': {'USD': 0.2}})
+        ctx = await self.convert(session, 5.0, "BRL", "USD", cog=cog)
+
+        self.assertEqual(len(session.urls), 1)
+        self.assertIn("**1,00 USD**", ctx.send.await_args.kwargs['embed'].description)
 
     async def test_network_errors_get_a_friendly_message_without_details(self):
         session = FakeHTTPSession(error=aiohttp.ClientConnectionError("10.0.0.1 refused"))

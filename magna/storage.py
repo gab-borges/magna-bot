@@ -5,8 +5,12 @@ import tempfile
 
 
 def data_file(name):
-    """Return the path of a data file, creating DATA_DIR when needed."""
-    directory = os.getenv('DATA_DIR', '.')
+    """Return the path of a data file, creating DATA_DIR when needed.
+
+    Without DATA_DIR (running outside the container) the files go to ./data,
+    which git ignores, instead of the repository root.
+    """
+    directory = os.getenv('DATA_DIR', 'data')
     os.makedirs(directory, exist_ok=True)
     return os.path.join(directory, name)
 

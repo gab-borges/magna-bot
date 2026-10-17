@@ -126,6 +126,8 @@ site pode quebrá-los (o `%tg diario` continua funcionando nesse caso).
 ```bash
 pip install -r requirements.txt
 ```
+Todas as dependências têm versão fixa, menos o yt-dlp, que sempre instala a
+versão mais recente (veja [Dependências](#dependências)).
 
 2. Configure as variáveis de ambiente no `.env`:
 - `TOKEN` - token do bot no Discord
@@ -148,6 +150,8 @@ sudo pacman -S ffmpeg
 ```bash
 python main.py
 ```
+Os aniversários, o contador de membros e os outros dados salvos ficam em
+`./data` (defina `DATA_DIR` para usar outro diretório).
 
 5. Rode os testes:
 ```bash
@@ -164,12 +168,49 @@ MAGNA_LIVE_TESTS=1 SPOTIFY_SHORT_LINK=https://spotify.link/... \
   python -m unittest tests.test_spotify_live -v
 ```
 
+## Dependências
+
+As dependências ficam em três arquivos:
+
+- `requirements.in`: as dependências diretas, editado à mão.
+- `requirements.lock`: gerado a partir do `requirements.in`, com todas as
+  versões fixadas, então um rebuild instala sempre o mesmo conjunto de pacotes.
+  O yt-dlp fica de fora.
+- `requirements.txt`: editado à mão, inclui o `requirements.lock` e adiciona o
+  yt-dlp sem versão. É o arquivo usado para instalar.
+
+O yt-dlp é a exceção porque o YouTube quebra versões antigas com frequência:
+toda instalação, no CI e na imagem, pega a versão mais recente dele. O rebuild
+semanal agendado garante que a imagem publicada não fique com um yt-dlp antigo
+mesmo sem novos commits. Numa instalação local que já tem o yt-dlp, atualize
+com `pip install --upgrade -r requirements.txt`.
+
+Para adicionar uma dependência, edite `requirements.in` e gere o lock de novo
+com [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv pip compile requirements.in -o requirements.lock \
+  --universal --python-version 3.11 --no-emit-package yt-dlp
+```
+
+Para atualizar as versões fixadas, rode o mesmo comando com `--upgrade` (tudo)
+ou `--upgrade-package <nome>` (um pacote só) e rode os testes antes de fazer o
+commit.
+
 ## Imagem no Docker Hub
 
 Cada push na branch `main` roda os testes e, se eles passarem, publica
 automaticamente uma imagem ARM64 em `docker.io/gabborges/magna-bot:latest` por
 meio de um runner ARM64 nativo do GitHub Actions. Pull requests rodam apenas os
 testes. O servidor não precisa receber o código-fonte nem fazer o build.
+Toda segunda-feira o workflow também refaz a imagem para pegar a versão mais
+recente do yt-dlp (veja [Dependências](#dependências)). Esse rebuild recebe
+também uma tag com a data, como `weekly-20261019`.
+
+Se uma versão nova do yt-dlp quebrar alguma coisa, recrie o container com a
+tag da semana anterior no lugar de `latest` até sair uma correção. Lembre de
+desativar a atualização automática enquanto isso, ou ela volta para a
+`latest`. As tags disponíveis aparecem na página do repositório no Docker Hub.
 
 A imagem inclui FFmpeg para reprodução de áudio. O recurso de renderização
 LaTeX foi removido para evitar centenas de megabytes de dependências adicionais.

@@ -1,9 +1,8 @@
-discord.py[voice]>=2.7.1
-aiohttp
-asyncpraw
-google-genai
-tzdata
+# Install with: pip install -r requirements.txt
+#
+# Everything except yt-dlp comes pinned from requirements.lock, which is
+# generated from requirements.in (see "Dependências" in the README).
+# yt-dlp is left unpinned on purpose: YouTube breaks old releases often, so
+# every install and image build takes the latest one.
+-r requirements.lock
 yt-dlp
-beautifulsoup4
-python-dotenv
-ytmusicapi
