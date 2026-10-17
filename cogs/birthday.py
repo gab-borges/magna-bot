@@ -40,7 +40,7 @@ def days_until(birthday, today):
 # Discord rejects embeds with more fields than this.
 EMBED_FIELD_LIMIT = 25
 
-class Birthday(commands.Cog):
+class Birthday(commands.Cog, name="Aniversários"):
     def __init__(self, bot):
         self.bot = bot
         self.birthdays = self.load_birthdays()
@@ -142,51 +142,51 @@ class Birthday(commands.Cog):
     @commands.hybrid_group(invoke_without_command=True, fallback="help")
     @commands.guild_only()
     async def birthday(self, ctx):
-        """Birthday commands"""
+        """Comandos de aniversário"""
         prefix = ctx.clean_prefix
-        await ctx.send(f"`{prefix}birthday list` shows everyone's birthday\n"
-                       "Admins only:\n"
-                       f"`{prefix}birthday add <member> <dd-mm>` sets a member's birthday\n"
-                       f"`{prefix}birthday remove <member>` removes it\n"
-                       f"`{prefix}birthday setchannel [channel]` picks where birthdays are announced\n"
-                       f"`{prefix}birthday removechannel` goes back to the server's system channel")
+        await ctx.send(f"`{prefix}birthday list` mostra o aniversário de todo mundo\n"
+                       "Só para administradores:\n"
+                       f"`{prefix}birthday add <membro> <dd-mm>` define o aniversário de um membro\n"
+                       f"`{prefix}birthday remove <membro>` remove o aniversário\n"
+                       f"`{prefix}birthday setchannel [canal]` escolhe onde os aniversários são anunciados\n"
+                       f"`{prefix}birthday removechannel` volta a usar o canal de sistema do servidor")
 
     # > Commands <  
     @commands.has_permissions(administrator=True)
     @birthday.command(name="add")
-    @app_commands.describe(member="Whose birthday it is", date="Day and month, like 25-12")
-    async def add_birthday(self, ctx, member: discord.Member, date: str):
-        """Add a member's birthday (format: dd-mm)"""
+    @app_commands.describe(membro="De quem é o aniversário", data="Dia e mês, como 25-12")
+    async def add_birthday(self, ctx, membro: discord.Member, data: str):
+        """Adiciona o aniversário de um membro (formato: dd-mm)"""
         try:
-            date = parse_birthday(date)
+            data = parse_birthday(data)
 
-            self.birthdays[str(member.id)] = date
+            self.birthdays[str(membro.id)] = data
             self.save_birthdays()
             
-            await ctx.send(f"Birthday for {member.mention} set to {date}! 🎂")
+            await ctx.send(f"Aniversário de {membro.mention} definido para {data}! 🎂")
         except ValueError:
-            await ctx.send("Invalid date format! Use dd-mm (example: 25-12)")
+            await ctx.send("Data inválida! Use dd-mm (exemplo: 25-12)")
 
     @commands.has_permissions(administrator=True)
     @birthday.command(name="remove")
-    @app_commands.describe(member="Whose birthday to remove")
-    async def remove_birthday(self, ctx, member: discord.Member):
-        """Remove a member's birthday"""
-        if str(member.id) in self.birthdays:
-            del self.birthdays[str(member.id)]
+    @app_commands.describe(membro="De quem remover o aniversário")
+    async def remove_birthday(self, ctx, membro: discord.Member):
+        """Remove o aniversário de um membro"""
+        if str(membro.id) in self.birthdays:
+            del self.birthdays[str(membro.id)]
             self.save_birthdays()
-            await ctx.send(f"{member.mention}'s birthday has been removed!")
+            await ctx.send(f"O aniversário de {membro.mention} foi removido!")
         else:
-            await ctx.send(f"{member.mention} doesn't have a birthday set!")
+            await ctx.send(f"{membro.mention} não tem aniversário cadastrado!")
 
     @birthday.command(name="list")
     async def list_birthdays(self, ctx):
-        """List all birthdays"""
+        """Lista todos os aniversários"""
         if not self.birthdays:
-            await ctx.send("No birthdays set!")
+            await ctx.send("Nenhum aniversário cadastrado!")
             return
 
-        embed = discord.Embed(title="🎂 Birthday List", color=discord.Color.blue())
+        embed = discord.Embed(title="🎂 Aniversários", color=discord.Color.blue())
 
         # Upcoming birthdays first, starting with today's.
         today = datetime.datetime.now(TIMEZONE).date()
@@ -198,30 +198,30 @@ class Birthday(commands.Cog):
         for member, date in members[:EMBED_FIELD_LIMIT]:
             embed.add_field(name=member.display_name, value=date, inline=True)
         if len(members) > EMBED_FIELD_LIMIT:
-            embed.set_footer(text=f"…and {len(members) - EMBED_FIELD_LIMIT} more")
+            embed.set_footer(text=f"…e mais {len(members) - EMBED_FIELD_LIMIT}")
 
         await ctx.send(embed=embed)
 
     @commands.has_permissions(administrator=True)
     @birthday.command(name="setchannel")
-    @app_commands.describe(channel="Where to announce birthdays (default: this channel)")
-    async def set_channel(self, ctx, channel: discord.TextChannel = None):
-        """Set the birthday announcement channel"""
-        channel = channel or ctx.channel
-        self.channels[str(ctx.guild.id)] = str(channel.id)
+    @app_commands.describe(canal="Onde anunciar os aniversários (padrão: este canal)")
+    async def set_channel(self, ctx, canal: discord.TextChannel = None):
+        """Define o canal dos anúncios de aniversário"""
+        canal = canal or ctx.channel
+        self.channels[str(ctx.guild.id)] = str(canal.id)
         self.save_channels()
-        await ctx.send(f"Birthday announcements will now be sent in {channel.mention}! 🎉")
+        await ctx.send(f"Os aniversários agora serão anunciados em {canal.mention}! 🎉")
 
     @commands.has_permissions(administrator=True)
     @birthday.command(name="removechannel")
     async def remove_channel(self, ctx):
-        """Remove the birthday announcement channel (will use system channel instead)"""
+        """Remove o canal de aniversários (volta a usar o canal de sistema)"""
         if str(ctx.guild.id) in self.channels:
             del self.channels[str(ctx.guild.id)]
             self.save_channels()
-            await ctx.send("Birthday channel removed! Will use system channel instead.")
+            await ctx.send("Canal de aniversários removido! Vou usar o canal de sistema do servidor.")
         else:
-            await ctx.send("No birthday channel was set!")
+            await ctx.send("Nenhum canal de aniversários estava definido!")
 
 async def setup(bot):
     await bot.add_cog(Birthday(bot))

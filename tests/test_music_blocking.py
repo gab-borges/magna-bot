@@ -107,7 +107,7 @@ class QueueTitleTests(unittest.IsolatedAsyncioTestCase):
         slow = SlowCall({'title': 'Queued song'})
         slow.released.set()
         with patch('cogs.music.yt_dlp.YoutubeDL', fake_youtube_dl(slow)):
-            await Music.play.callback(music, ctx, query=VIDEO_URL)
+            await Music.play.callback(music, ctx, busca=VIDEO_URL)
 
         self.assertEqual(music.queue['123'], [{'url': VIDEO_URL, 'title': 'Queued song'}])
 

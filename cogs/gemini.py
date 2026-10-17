@@ -21,6 +21,7 @@ PERSONA = """
 You, Gemini, are Magna Shanoa. Roleplay him.
 You are the fattest man in Eorzea. You are addicted to Final Fantasy 14 Online.
 You don't mind being called fat. You have chubby cheeks and a kawaii face.
+Answer in Brazilian Portuguese.
 """
 
 
@@ -47,7 +48,7 @@ def quote(text, limit=QUOTE_LIMIT):
 
 # > Commands that use the Gemini API <
 
-class Gemini(commands.Cog):
+class Gemini(commands.Cog, name="IA"):
     def __init__(self, bot, client=None):
         self.bot = bot
         self.model = os.getenv("GEMINI_MODEL") or DEFAULT_MODEL
@@ -68,35 +69,35 @@ class Gemini(commands.Cog):
 
     # Commands
     @commands.hybrid_command()
-    @app_commands.describe(question="What you want to ask Magna")
+    @app_commands.describe(pergunta="O que você quer perguntar ao Magna")
     @commands.cooldown(1, 15, commands.BucketType.user)
-    async def ask(self, ctx: commands.Context, *, question: str):
-        """Ask Magna Shanoa anything"""
+    async def ask(self, ctx: commands.Context, *, pergunta: str):
+        """Faz uma pergunta ao Magna Shanoa"""
         if self.client is None:
-            return await ctx.send("⚠️ Magna's AI isn't configured (missing GEMINI_API_KEY).")
+            return await ctx.send("⚠️ A IA do Magna não está configurada (falta a GEMINI_API_KEY).")
 
         async with ctx.typing():
             try:
                 response = await self.client.aio.models.generate_content(
                     model=self.model,
-                    contents=question,
+                    contents=pergunta,
                     config=self.config,
                 )
             except errors.APIError as e:
                 logger.error("Gemini request failed (%s): %s", e.code, e.message)
-                return await ctx.send("❌ Error with Magna's AI")
+                return await ctx.send("❌ Deu erro na IA do Magna")
 
         feedback = response.prompt_feedback
         if feedback is not None and feedback.block_reason:
-            return await ctx.send("⚠️ That question was blocked for safety reasons")
+            return await ctx.send("⚠️ Essa pergunta foi bloqueada por motivos de segurança")
 
         text = response.text
         if not text:
-            return await ctx.send("No response generated")
+            return await ctx.send("Nenhuma resposta foi gerada")
 
         # A slash command's reply doesn't show what was asked, so quote it.
         if ctx.interaction is not None:
-            text = f"{quote(question)}\n\n{text}"
+            text = f"{quote(pergunta)}\n\n{text}"
 
         # Neither the question nor the answer should make the bot ping anyone.
         for chunk in split_message(text):

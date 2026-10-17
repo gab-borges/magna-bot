@@ -194,7 +194,7 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
     async def play(self, music, query=TRACK_URL):
         ctx = make_ctx(voice_client=self.vc)
         ctx.author.voice.channel = self.vc.channel
-        await Music.play.callback(music, ctx, query=query)
+        await Music.play.callback(music, ctx, busca=query)
         return ctx
 
     async def test_unreadable_track_reports_an_error_without_searching(self):
@@ -204,7 +204,7 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
         music.find_spotify_match.assert_not_awaited()
         music.play_song.assert_not_awaited()
-        self.assertIn("couldn't read this Spotify track", sent_text(ctx))
+        self.assertIn("Não consegui ler essa música do Spotify", sent_text(ctx))
 
     async def test_track_without_a_reliable_match_is_skipped(self):
         music = self.make_music(match=None)
@@ -213,7 +213,7 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
         music.play_song.assert_not_awaited()
         self.assertIn(
-            "couldn't find a reliable match for **Track — Artist** on YouTube, so I skipped it",
+            "Não achei uma versão confiável de **Track — Artist** no YouTube, então pulei essa",
             sent_text(ctx),
         )
 
@@ -224,7 +224,7 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
         music.play_song.assert_not_awaited()
         self.assertEqual(music.queue['123'], [{'url': YOUTUBE_URL, 'title': 'Track — Artist'}])
-        self.assertIn("Added to queue: **Track — Artist**", sent_text(ctx))
+        self.assertIn("Adicionada à fila: **Track — Artist**", sent_text(ctx))
 
     async def test_artist_link_is_rejected_without_network_requests(self):
         music = self.make_music()
@@ -235,7 +235,7 @@ class SpotifyPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
         session.assert_not_called()
         music.find_spotify_match.assert_not_awaited()
-        self.assertIn("Only track, album and playlist links are supported", sent_text(ctx))
+        self.assertIn("Só aceito links de músicas, álbuns e playlists", sent_text(ctx))
 
     async def test_spotify_track_plays_its_match_without_prompt(self):
         music = self.make_music()
@@ -506,7 +506,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
     async def play(self, music, query=PLAYLIST_URL):
         ctx = make_ctx(voice_client=self.vc)
         ctx.author.voice.channel = self.vc.channel
-        await Music.play.callback(music, ctx, query=query)
+        await Music.play.callback(music, ctx, busca=query)
         return ctx
 
     async def test_playlist_starts_its_first_track_and_queues_the_rest(self):
@@ -517,7 +517,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
         music.find_spotify_match.assert_awaited_once_with(numbered_track(1))
         music.play_song.assert_awaited_once_with(ctx, YOUTUBE_URL)
         self.assertEqual(music.queue['123'], [queued(2), queued(3)])
-        self.assertIn("Added 3 tracks from **Mix** to the queue", sent_text(ctx))
+        self.assertIn("3 músicas de **Mix** adicionadas à fila", sent_text(ctx))
 
     async def test_playlist_is_queued_without_searching_while_music_plays(self):
         music = self.make_music(playing=True)
@@ -538,7 +538,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
         ctx = await self.play(music)
 
         self.assertEqual(len(music.queue['123']), 100)
-        self.assertIn("Only the first 100 tracks can be read", sent_text(ctx))
+        self.assertIn("Só consigo ler as primeiras 100 músicas", sent_text(ctx))
 
     async def test_a_full_page_warns_that_the_playlist_may_be_cut(self):
         # Spotify's embed page stops at 100 tracks, so 100 may mean "more".
@@ -548,8 +548,8 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
 
                 ctx = await self.play(music)
 
-                self.assertIn(f"Added {count} tracks", sent_text(ctx))
-                self.assertEqual("Only the first 100 tracks can be read" in sent_text(ctx), warned)
+                self.assertIn(f"{count} músicas de", sent_text(ctx))
+                self.assertEqual("Só consigo ler as primeiras 100 músicas" in sent_text(ctx), warned)
 
     async def test_unreadable_playlist_reports_an_error(self):
         music = self.make_music()
@@ -558,7 +558,7 @@ class SpotifyCollectionPlaybackTests(unittest.IsolatedAsyncioTestCase):
         ctx = await self.play(music)
 
         music.play_song.assert_not_awaited()
-        self.assertIn("couldn't read the tracks of this Spotify album or playlist", sent_text(ctx))
+        self.assertIn("Não consegui ler as músicas desse álbum ou playlist do Spotify", sent_text(ctx))
 
     async def test_short_link_to_a_playlist_queues_the_playlist(self):
         music = self.make_music(playing=True)
@@ -608,7 +608,7 @@ class QueuedSearchTests(unittest.IsolatedAsyncioTestCase):
         music.play_song.assert_awaited_once_with(ctx, YOUTUBE_URL)
         self.assertEqual(music.queue['123'], [])
         self.assertIn(
-            "couldn't find a reliable match for **Song 1 — Artist** on YouTube, so I skipped it",
+            "Não achei uma versão confiável de **Song 1 — Artist** no YouTube, então pulei essa",
             sent_text(ctx),
         )
 
@@ -651,7 +651,7 @@ class QueuedSearchTests(unittest.IsolatedAsyncioTestCase):
 
         embed = ctx.send.await_args.kwargs['embed']
         self.assertEqual(len(embed.fields), 20)
-        self.assertEqual(embed.footer.text, "…and 10 more")
+        self.assertEqual(embed.footer.text, "…e mais 10")
 
 
 if __name__ == "__main__":

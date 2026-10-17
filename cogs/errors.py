@@ -12,8 +12,27 @@ def usage(ctx):
     return f"`{text}`"
 
 
+# How Discord's Portuguese client names the permissions; others fall back to
+# the English name.
+PERMISSION_NAMES = {
+    'administrator': 'Administrador',
+    'manage_guild': 'Gerenciar servidor',
+    'manage_channels': 'Gerenciar canais',
+    'manage_messages': 'Gerenciar mensagens',
+    'move_members': 'Mover membros',
+    'send_messages': 'Enviar mensagens',
+    'embed_links': 'Inserir links',
+    'read_message_history': 'Ver histórico de mensagens',
+    'connect': 'Conectar',
+    'speak': 'Falar',
+}
+
+
 def permission_names(permissions):
-    return ", ".join(f"`{name.replace('_', ' ').title()}`" for name in permissions)
+    return ", ".join(
+        f"`{PERMISSION_NAMES.get(name) or name.replace('_', ' ').title()}`"
+        for name in permissions
+    )
 
 
 class ErrorHandler(commands.Cog):

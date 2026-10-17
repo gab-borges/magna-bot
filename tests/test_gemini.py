@@ -39,7 +39,7 @@ class AskTests(unittest.IsolatedAsyncioTestCase):
     async def ask(self, client, question="Who are you?"):
         cog = Gemini(bot=None, client=client)
         ctx = make_ctx()
-        await Gemini.ask.callback(cog, ctx, question=question)
+        await Gemini.ask.callback(cog, ctx, pergunta=question)
         return cog, ctx
 
     async def test_sends_the_answer_using_the_persona_as_system_instruction(self):
@@ -80,7 +80,7 @@ class AskTests(unittest.IsolatedAsyncioTestCase):
 
         _, ctx = await self.ask(make_client(response))
 
-        self.assertIn("blocked for safety", sent(ctx)[0])
+        self.assertIn("bloqueada por motivos de segurança", sent(ctx)[0])
 
     async def test_api_errors_are_logged_and_reported(self):
         error = errors.ClientError(429, {'error': {'message': 'quota', 'status': 'RESOURCE_EXHAUSTED'}})
@@ -88,14 +88,14 @@ class AskTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs('cogs.gemini', level='ERROR'):
             _, ctx = await self.ask(make_client(error=error))
 
-        self.assertEqual(sent(ctx), ["❌ Error with Magna's AI"])
+        self.assertEqual(sent(ctx), ["❌ Deu erro na IA do Magna"])
 
     async def test_without_an_api_key_the_command_explains_it(self):
         with patch.dict(os.environ, {'GEMINI_API_KEY': ''}), self.assertLogs('cogs.gemini', 'WARNING'):
             cog = Gemini(bot=None)
         ctx = make_ctx()
 
-        await Gemini.ask.callback(cog, ctx, question="hi")
+        await Gemini.ask.callback(cog, ctx, pergunta="hi")
 
         self.assertIn("GEMINI_API_KEY", sent(ctx)[0])
 

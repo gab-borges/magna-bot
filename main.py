@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from magna.help import HelpCommand
 from magna.slash import sync_commands
 
 # Load .env
@@ -44,6 +45,7 @@ intents.voice_states = True
 # must never be able to ping @everyone, @here or a role.
 bot = MagnaBot(
     command_prefix="%",
+    help_command=HelpCommand(),
     intents=intents,
     allowed_mentions=discord.AllowedMentions(everyone=False, roles=False),
 )

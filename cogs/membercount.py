@@ -8,7 +8,7 @@ from magna.storage import data_file, load_json, save_json
 
 logger = logging.getLogger(__name__)
 
-class MemberCount(commands.Cog):
+class MemberCount(commands.Cog, name="Contador de membros"):
     def __init__(self, bot):
         self.bot = bot
         self.config = self.load_config()
@@ -65,13 +65,13 @@ class MemberCount(commands.Cog):
 
     # > Commands <
     @commands.hybrid_command()
-    @app_commands.describe(channel="Voice channel whose name will show the member count")
+    @app_commands.describe(canal="Canal de voz cujo nome vai mostrar o número de membros")
     @app_commands.default_permissions(administrator=True)
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
-    async def setmembercount(self, ctx, channel: discord.VoiceChannel):
-        """Define the channel that will show the member count"""
-        self.config[str(ctx.guild.id)] = str(channel.id)
+    async def setmembercount(self, ctx, canal: discord.VoiceChannel):
+        """Define o canal que vai mostrar o número de membros"""
+        self.config[str(ctx.guild.id)] = str(canal.id)
         self.save_config()
         
         # Renaming a channel can wait on Discord's rate limit.
@@ -79,22 +79,22 @@ class MemberCount(commands.Cog):
 
         # Immediate update
         count = ctx.guild.member_count
-        await channel.edit(name=f"👥 Membros: {count}")
+        await canal.edit(name=f"👥 Membros: {count}")
         
-        await ctx.send(f"Channel {channel.mention} configured to show the member count!")
+        await ctx.send(f"O canal {canal.mention} agora mostra o número de membros!")
 
     @commands.hybrid_command()
     @app_commands.default_permissions(administrator=True)
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def stopmembercount(self, ctx):
-        """Stop updating the member count"""
+        """Para de atualizar o número de membros"""
         if str(ctx.guild.id) in self.config:
             del self.config[str(ctx.guild.id)]
             self.save_config()
-            await ctx.send("Member count disabled!")
+            await ctx.send("Contador de membros desativado!")
         else:
-            await ctx.send("No channel configured in this server!")
+            await ctx.send("Nenhum canal configurado neste servidor!")
 
 async def setup(bot):
     await bot.add_cog(MemberCount(bot))

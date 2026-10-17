@@ -24,7 +24,7 @@ def parse_dice(expression):
         match = TERM_PATTERN.match(expression, pos)
         # Every term after the first needs a sign to join it to the previous one.
         if not match or match.end() == pos or (pos > 0 and not match.group(1)):
-            raise DiceError("❌ Invalid dice format! Use format like: 2d20+5 or 3d6+2d4-2")
+            raise DiceError("❌ Formato de dados inválido! Use algo como: 2d20+5 ou 3d6+2d4-2")
         pos = match.end()
 
         sign = -1 if match.group(1) == '-' else 1
@@ -34,39 +34,39 @@ def parse_dice(expression):
 
         dice, sides = int(match.group(2) or 1), int(match.group(3))
         if dice > MAX_DICE:
-            raise DiceError(f"❌ You can't roll more than {MAX_DICE} dice at once!")
+            raise DiceError(f"❌ Não dá para rolar mais de {MAX_DICE} dados de uma vez!")
         if sides > MAX_SIDES:
-            raise DiceError(f"❌ Dice can't have more than {MAX_SIDES} sides!")
+            raise DiceError(f"❌ Os dados não podem ter mais de {MAX_SIDES} lados!")
         if dice < 1 or sides < 1:
-            raise DiceError("❌ Dice need at least 1 die and 1 side!")
+            raise DiceError("❌ É preciso pelo menos 1 dado com pelo menos 1 lado!")
         terms.append((sign, dice, sides))
 
     if not terms and not modifier:
-        raise DiceError("❌ Invalid dice format! Use format like: 2d20+5 or 3d6+2d4-2")
+        raise DiceError("❌ Formato de dados inválido! Use algo como: 2d20+5 ou 3d6+2d4-2")
     if len(terms) > MAX_TERMS:
-        raise DiceError(f"❌ You can't combine more than {MAX_TERMS} kinds of dice!")
+        raise DiceError(f"❌ Não dá para combinar mais de {MAX_TERMS} tipos de dados!")
     return terms, modifier
 
 
-class Roll(commands.Cog):
+class Roll(commands.Cog, name="Dados"):
     def __init__(self, bot):
         self.bot = bot
 
     @commands.hybrid_command()
-    @app_commands.describe(dice_expression="Dice to roll, like 2d20+5 or 3d6+2d4-2")
-    async def roll(self, ctx, *, dice_expression: str):
-        """Roll dice using the format XdY+Z
-        Example: %roll 2d20+5 (rolls 2 d20 dice and adds 5)
-        You can combine multiple dice: %roll 5d6+2d4-2"""
+    @app_commands.describe(dados="Dados para rolar, como 2d20+5 ou 3d6+2d4-2")
+    async def roll(self, ctx, *, dados: str):
+        """Rola dados no formato XdY+Z
+        Exemplo: %roll 2d20+5 (rola 2 dados d20 e soma 5)
+        Dá para combinar vários dados: %roll 5d6+2d4-2"""
         try:
-            terms, modifier = parse_dice(dice_expression)
+            terms, modifier = parse_dice(dados)
         except DiceError as e:
             await ctx.send(str(e))
             return
 
         # Create a nice embed to show the results
         embed = discord.Embed(
-            title="🎲 Dice Roll Results",
+            title="🎲 Resultado dos dados",
             color=discord.Color.blue()
         )
 
@@ -75,13 +75,13 @@ class Roll(commands.Cog):
             dice_rolls = [random.randint(1, sides) for _ in range(dice)]
             total += sign * sum(dice_rolls)
             embed.add_field(
-                name=f"{'-' if sign < 0 else ''}{dice}d{sides} rolls",
+                name=f"{'-' if sign < 0 else ''}{dice}d{sides}",
                 value=f"[{', '.join(map(str, dice_rolls))}]",
                 inline=False
             )
 
         if modifier:
-            embed.add_field(name="Modifier", value=f"{modifier:+d}", inline=False)
+            embed.add_field(name="Modificador", value=f"{modifier:+d}", inline=False)
 
         # Add the total
         embed.add_field(

@@ -1,147 +1,167 @@
 # Magna Bot 🤖
 
-A Discord bot built with Python and discord.py that combines fun interactions with utility features. The bot includes AI chat capabilities through Google's Gemini API, Reddit meme fetching, birthday tracking, and member counting functionality.
+Um bot de Discord feito em Python com discord.py, que junta brincadeiras e
+utilidades. Ele conversa por IA com a API Gemini do Google, busca memes no
+Reddit, acompanha aniversários e mostra o número de membros do servidor. Toda a
+interface do bot é em português.
 
-## Features 🌟
+## Funcionalidades 🌟
 
-- **AI Chat**: Chat with Magna Shanoa using Google's Gemini AI (`%ask`)
-- **Reddit Memes**: Fetch random memes from popular subreddits (`%meme`)
-- **Birthday Tracking**: Manage and celebrate member birthdays (`%birthday`)
-- **Member Counter**: Automatic server member counting
-- **Simple Commands**: Basic interaction commands (`%hello`, `%ping`)
-- **TimeGuessr**: Guess where and when photos were taken (`%tg`, see below)
-- **Music Player**: Advanced music player with multiple features:
-  - Play YouTube URLs (`%play [url]`)
-  - Search and play songs (`%play [search term]`)
-  - Play Spotify tracks, albums and playlists (`%play [spotify url]`)
-  - Queue management (`%queue`)
-  - Playback controls (`%pause`, `%stop`, `%skip`)
-  - Voice channel management (`%leave`)
+- **Conversa com IA**: converse com o Magna Shanoa pelo Gemini, do Google (`%ask`)
+- **Memes do Reddit**: memes aleatórios de subreddits populares (`%meme`)
+- **Aniversários**: cadastra e comemora os aniversários dos membros (`%birthday`)
+- **Contador de membros**: um canal que mostra quantos membros o servidor tem
+- **Comandos simples**: interações básicas (`%hello`, `%ping`)
+- **Dados**: rola dados de RPG (`%roll 2d20+5`)
+- **Moedas**: converte valores entre moedas (`%coin 5 BRL USD`)
+- **TimeGuessr**: adivinhe onde e quando as fotos foram tiradas (`%tg`, veja abaixo)
+- **Música**: um player de música completo:
+  - Toca links do YouTube (`%play [link]`)
+  - Busca e toca músicas (`%play [busca]`)
+  - Toca músicas, álbuns e playlists do Spotify (`%play [link do spotify]`)
+  - Fila de músicas (`%queue`)
+  - Controles (`%pause`, `%stop`, `%skip`, `%loop`)
+  - Saída do canal de voz (`%leave`)
 
-## Slash Commands ⚡
+`%help` lista os comandos por categoria, e `%help <comando>` explica um comando
+e seus argumentos.
 
-Every command works both with the `%` prefix and as a Discord slash command:
-`%play never gonna give you up` and `/play` do the same thing. Slash commands
-show a description of each argument while typing, and some suggest values:
+## Comandos de barra ⚡
 
-- `/play` suggests songs from YouTube Music as you type; picking one plays
-  that exact song. Typing a link or any other text works as with `%play`.
-- `/coin` suggests common currency codes.
+Todo comando funciona tanto com o prefixo `%` quanto como comando de barra do
+Discord: `%play never gonna give you up` e `/play` fazem a mesma coisa. Os
+comandos de barra mostram uma descrição de cada argumento enquanto você digita,
+e alguns sugerem valores:
 
-Error messages of slash commands are only shown to whoever ran the command,
-and server-only commands (music, birthdays, member count) don't show up in
-DMs. `/setmembercount` and `/stopmembercount` only show up for administrators.
-Prefix aliases (`%hi`, `%tg`, `%tgparar`) only work with `%`. `/birthday`
-works through subcommands (`/birthday add`, `/birthday list`, …), and
-`/birthday help` stands in for a bare `%birthday`.
+- `/play` sugere músicas do YouTube Music enquanto você digita; escolher uma
+  toca exatamente aquela música. Um link ou qualquer outro texto funciona como
+  no `%play`.
+- `/coin` sugere as moedas mais comuns (pelo código ou pelo nome, com ou sem
+  acento).
 
-The bot registers its slash commands with Discord when it starts, but only
-when they changed since the last start (Discord rate-limits this); what was
-last registered is kept in `app_commands.json` in the data directory. The bot's
-owner can force a new registration with `%sync`. To show up in a server, the
-bot must have been invited with the `applications.commands` scope (together
-with `bot`); bots invited before may need to be invited again with the new
-scope. A new command can take a moment to show up, and Discord's client may
-need a restart (Ctrl+R) to show changes right away.
+As mensagens de erro dos comandos de barra só aparecem para quem usou o
+comando, e os comandos que só funcionam em servidores (música, aniversários,
+contador de membros) não aparecem na DM. `/setmembercount` e `/stopmembercount`
+só aparecem para administradores. Os apelidos de prefixo (`%hi`, `%tg`,
+`%tgparar`) só funcionam com `%`. O `/birthday` funciona por subcomandos
+(`/birthday add`, `/birthday list`, …), e `/birthday help` faz o papel do
+`%birthday` sozinho.
 
-## Music Commands 🎵
+O bot registra os comandos de barra no Discord quando inicia, mas só quando
+eles mudaram desde a última vez (o Discord limita quantas vezes isso pode ser
+feito); o que foi registrado por último fica em `app_commands.json`, no
+diretório de dados. O dono do bot pode forçar um novo registro com `%sync`.
+Para os comandos aparecerem num servidor, o bot precisa ter sido convidado com
+o escopo `applications.commands` (junto com `bot`); bots convidados antes
+disso podem precisar ser convidados de novo com o novo escopo. Um comando novo
+pode demorar um pouco para aparecer, e o Discord pode precisar ser recarregado
+(Ctrl+R) para mostrar as mudanças na hora.
 
-- `%play [url/search/spotify]`: Play music from YouTube URL, Spotify URL, or search term
-- `%pause`: Pause/Resume the current song
-- `%stop`: Stop playing and clear the queue
-- `%skip`: Skip to the next song
-- `%queue`: Show the current queue
-- `%leave`: Leave the voice channel
+## Comandos de música 🎵
 
-Only YouTube video links, Spotify track, album and playlist links and search
-terms are accepted. Spotify audio is not streamed: the bot reads each track's
-name, artists and duration from Spotify's public embed page (no account needed)
-and looks for the same recording on YouTube Music (official songs first, then
-videos) and then YouTube. A result is only played when its title, one of its
-artists and its duration (within a few seconds) match the track; otherwise the
-track is skipped with a message, rather than playing a guess. Albums and
-playlists queue up to 100 tracks (Spotify's embed page lists no more than
-that, and the bot says so when a playlist reaches it), and each one is looked
-up only when its turn comes.
-Playback controls (and `%play` while music is playing) only work from the bot's
-voice channel, unless the member has the *Move Members* permission.
-The bot leaves the voice channel on its own after 5 minutes with nothing
-playing or queued, or 2 minutes after everyone else has left it.
+- `%play [link/busca/spotify]`: toca uma música por link do YouTube, link do
+  Spotify ou busca
+- `%pause`: pausa/retoma a música atual
+- `%stop`: para a música e limpa a fila
+- `%skip`: pula para a próxima música
+- `%loop`: liga/desliga a repetição da música atual
+- `%queue`: mostra a fila
+- `%leave`: sai do canal de voz
+
+Numa busca, o bot mostra até 10 resultados: responda com o número da música ou
+com `cancelar`.
+
+Só são aceitos links de vídeos do YouTube, links de músicas, álbuns e playlists
+do Spotify e buscas. O áudio do Spotify não é transmitido: o bot lê o nome, os
+artistas e a duração de cada música na página pública de embed do Spotify (sem
+precisar de conta) e procura a mesma gravação no YouTube Music (primeiro as
+músicas oficiais, depois os vídeos) e depois no YouTube. Um resultado só é
+tocado quando o título, um dos artistas e a duração (com poucos segundos de
+diferença) batem com a música; se nada bater, a música é pulada com um aviso,
+em vez de tocar um chute. Álbuns e playlists colocam até 100 músicas na fila (a
+página de embed do Spotify não lista mais que isso, e o bot avisa quando uma
+playlist chega nesse limite), e cada uma só é procurada quando chega a vez
+dela.
+Os controles (e o `%play` enquanto algo está tocando) só funcionam de dentro do
+canal de voz do bot, a não ser que o membro tenha a permissão *Mover membros*.
+O bot sai do canal de voz sozinho depois de 5 minutos sem nada tocando nem na
+fila, ou 2 minutos depois que todo mundo saiu do canal.
 
 ## TimeGuessr 🌍
 
-- `%tg [segundos] [rodadas]`: a game with random photos from
-  [TimeGuessr](https://timeguessr.com) (its free play mode and past daily
-  challenges), 5 by default and up to 15: `%tg 45 10` plays 10 rounds of 45
-  seconds. Photos already shown in a server aren't shown there again.
-- `%tg diario [segundos] [rodadas]`: today's daily challenge, the same for
-  everyone. It has 5 photos, so `rodadas` can only shorten it.
-- `/timeguessr` takes the same options (`modo`, `tempo`, `rodadas`), each
-  optional.
-- `%tgstop`: ends the game (whoever started it, or a moderator).
+- `%tg [segundos] [rodadas]`: um jogo com fotos aleatórias do
+  [TimeGuessr](https://timeguessr.com) (do modo livre e de desafios diários
+  passados), 5 por padrão e até 15: `%tg 45 10` joga 10 rodadas de 45
+  segundos. Fotos que já apareceram num servidor não aparecem de novo nele.
+- `%tg diario [segundos] [rodadas]`: o desafio diário de hoje, o mesmo para
+  todo mundo. Ele tem 5 fotos, então `rodadas` só pode encurtá-lo.
+- `/timeguessr` aceita as mesmas opções (`modo`, `tempo`, `rodadas`), todas
+  opcionais.
+- `%tgstop`: encerra o jogo (quem começou ou um moderador).
 
-Each photo has a **✏️ Palpitar** button that opens a form for the country and
-the year, so nobody sees (or copies) a guess before the answer; a guess typed
-in the chat is deleted (when the bot may) with a hint to use the button. A
-guess can be changed until the round ends, and from the second round on, a
-round ends as soon as everyone who played the earlier rounds has guessed.
+Cada foto tem um botão **✏️ Palpitar** que abre um formulário para o país e o
+ano, assim ninguém vê (nem copia) um palpite antes da resposta; um palpite
+digitado no chat é apagado (quando o bot pode) com uma dica para usar o botão.
+Dá para mudar o palpite até o fim da rodada, e a partir da segunda rodada ela
+acaba assim que todo mundo que jogou as rodadas anteriores já palpitou.
 
-Countries can be typed in Portuguese or English, as codes (`EUA`, `UK`) and
-without accents, and small typos are forgiven; the country names and
-coordinates come with the bot (`magna/countries.json`, from
-[mledoze/countries](https://github.com/mledoze/countries), ODbL). Scoring:
-up to 2,500 points for the year (100 fewer per year off) and 2,500 for the
-place: all of them for the right country, otherwise fewer the farther the
-guessed country's center is from the photo. The answer shows how many years
-and kilometers each player was off, with links to Google Maps and, when
-TimeGuessr has one, Street View.
+Os países podem ser digitados em português ou inglês, como siglas (`EUA`, `UK`)
+e sem acento, e pequenos erros de digitação são perdoados; os nomes e as
+coordenadas dos países vêm com o bot (`magna/countries.json`, de
+[mledoze/countries](https://github.com/mledoze/countries), ODbL). Pontuação:
+até 2.500 pontos pelo ano (100 a menos por ano de diferença) e 2.500 pelo
+lugar: todos pelo país certo, e menos quanto mais longe o centro do país do
+palpite estiver da foto. A resposta mostra quantos anos e quilômetros cada
+jogador errou, com links para o Google Maps e, quando o TimeGuessr tem, para o
+Street View.
 
-The photos already shown are kept in `timeguessr_seen.json` in the data
-directory. Only the daily challenge comes from a public endpoint; random
-games read the data the site's own pages load, so a change to the site can
-break them (`%tg diario` keeps working then).
+As fotos que já apareceram ficam em `timeguessr_seen.json`, no diretório de
+dados. Só o desafio diário vem de um endpoint público; os jogos aleatórios
+leem os dados que as próprias páginas do site carregam, então uma mudança no
+site pode quebrá-los (o `%tg diario` continua funcionando nesse caso).
 
-## Setup 🚀
+## Instalação 🚀
 
-1. Install dependencies:
+1. Instale as dependências:
 ```bash
 pip install -r requirements.txt
 ```
-Every dependency is pinned except yt-dlp, which always installs the latest
-release (see [Dependências](#dependências)).
+Todas as dependências têm versão fixa, menos o yt-dlp, que sempre instala a
+versão mais recente (veja [Dependências](#dependências)).
 
-2. Set up environment variables in `.env`:
-- `TOKEN` - Discord Bot Token
-- `GEMINI_API_KEY` - Google Gemini API Key
-- `GEMINI_MODEL` - (optional) Gemini model to use; defaults to `gemini-flash-latest`
-- `REDDIT_CLIENT_ID` - Reddit API Client ID
-- `REDDIT_CLIENT_SECRET` - Reddit API Client Secret
-- `REDDIT_USER_AGENT` - Reddit API User Agent
+2. Configure as variáveis de ambiente no `.env`:
+- `TOKEN` - token do bot no Discord
+- `GEMINI_API_KEY` - chave da API Gemini, do Google
+- `GEMINI_MODEL` - (opcional) modelo do Gemini; o padrão é `gemini-flash-latest`
+- `REDDIT_CLIENT_ID` - Client ID da API do Reddit
+- `REDDIT_CLIENT_SECRET` - Client Secret da API do Reddit
+- `REDDIT_USER_AGENT` - User Agent da API do Reddit
 
-3. Install system dependencies:
+3. Instale as dependências do sistema:
 ```bash
-# For Debian/Ubuntu
+# Debian/Ubuntu
 sudo apt-get update && sudo apt-get install -y ffmpeg
 
-# For Arch Linux
+# Arch Linux
 sudo pacman -S ffmpeg
 ```
 
-4. Run the bot:
+4. Rode o bot:
 ```bash
 python main.py
 ```
-Birthdays, member counts and the other saved data go to `./data` (set `DATA_DIR` to use another directory).
+Os aniversários, o contador de membros e os outros dados salvos ficam em
+`./data` (defina `DATA_DIR` para usar outro diretório).
 
-5. Run the tests:
+5. Rode os testes:
 ```bash
 python -m unittest
 ```
 
-Live checks against the real Spotify and YouTube services are skipped by
-default (and in CI). To run them, optionally with a `spotify.link` URL shared
-from the Spotify app and one of your playlists (the number of tracks read is
-printed):
+Os testes ao vivo contra o Spotify e o YouTube de verdade são pulados por
+padrão (e no CI). Para rodá-los, opcionalmente com um link `spotify.link`
+compartilhado pelo app do Spotify e uma das suas playlists (o número de
+músicas lidas é mostrado):
 ```bash
 MAGNA_LIVE_TESTS=1 SPOTIFY_SHORT_LINK=https://spotify.link/... \
   SPOTIFY_PLAYLIST_URL=https://open.spotify.com/playlist/... \

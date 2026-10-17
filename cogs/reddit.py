@@ -22,7 +22,7 @@ def truncate(text, limit):
 
 # > Commands that use the Reddit API <
 
-class Reddit(commands.Cog):
+class Reddit(commands.Cog, name="Memes"):
     def __init__(self, bot):
         self.bot = bot
         self.reddit = self.make_client()
@@ -56,9 +56,9 @@ class Reddit(commands.Cog):
     @commands.hybrid_command()
     @commands.cooldown(1, 10, commands.BucketType.user)
     async def meme(self, ctx: commands.Context):
-        """Post a random meme from Reddit"""
+        """Posta um meme aleatório do Reddit"""
         if self.reddit is None:
-            return await ctx.send("⚠️ Memes aren't configured (missing Reddit API credentials).")
+            return await ctx.send("⚠️ Os memes não estão configurados (faltam as credenciais da API do Reddit).")
 
         is_nsfw = getattr(ctx.channel, "is_nsfw", None)
         allow_nsfw = bool(is_nsfw and is_nsfw())
@@ -77,7 +77,7 @@ class Reddit(commands.Cog):
                     break
 
         if post is None:
-            await ctx.send("❌ Couldn't find a meme right now. Try again later.")
+            await ctx.send("❌ Não consegui encontrar um meme agora. Tente novamente mais tarde.")
             return
 
         meme_embed = discord.Embed(
@@ -85,11 +85,11 @@ class Reddit(commands.Cog):
             description=truncate(post.selftext, EMBED_DESCRIPTION_LIMIT) or None,
             color=discord.Color.green()
         )
-        meme_embed.set_author(name=f"Requested by {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+        meme_embed.set_author(name=f"Pedido por {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
         meme_embed.set_image(url=post.url)
         # Deleted accounts show up as a post without an author.
-        author_name = post.author.name if post.author else "[deleted]"
-        meme_embed.set_footer(text=f"Post by u/{author_name} from r/{subreddit_name}")
+        author_name = post.author.name if post.author else "[excluído]"
+        meme_embed.set_footer(text=f"Post de u/{author_name} em r/{subreddit_name}")
 
         await ctx.send(embed=meme_embed)
 
